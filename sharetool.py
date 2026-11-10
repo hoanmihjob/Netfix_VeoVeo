@@ -182,8 +182,127 @@ def get_session_path():
 # ==========================================
 # CẤU HÌNH BOT TELEGRAM
 # ==========================================
-FEEDBACK_BOT_TOKEN = "9036345671:AAEfxAK2-JuI3mBSQMJourgOfgMORlmXqCs"
-FEEDBACK_CHAT_ID = "8559042403"
+FEEDBACK_BOT_TOKEN = os.environ.get("FEEDBACK_BOT_TOKEN", "9036345671:AAEfxAK2-JuI3mBSQMJourgOfgMORlmXqCs")
+FEEDBACK_CHAT_ID = os.environ.get("FEEDBACK_CHAT_ID", "8559042403")
+
+# ==========================================
+# QUẢN LÝ TIMER TẬP TRUNG
+# ==========================================
+class CountdownTimer:
+    """Quản lý timer đếm ngược tái sử dụng cho các tác vụ UI"""
+    def __init__(self, root):
+        self.root = root
+        self._after_id = None
+
+    def cancel(self):
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def is_running(self):
+        return self._after_id is not None
+
+    def start(self, seconds, on_tick, on_done):
+        self.cancel()
+        self._step(seconds, on_tick, on_done)
+
+    def _step(self, seconds_left, on_tick, on_done):
+        if seconds_left > 0:
+            if on_tick:
+                on_tick(seconds_left)
+            self._after_id = self.root.after(1000, lambda: self._step(seconds_left - 1, on_tick, on_done))
+        else:
+            self._after_id = None
+            if on_done:
+                on_done()
+
+# ==========================================
+# QUẢN LÝ KẾT NỐI TELEGRAM (PERSISTENT CLIENT)
+# ==========================================
+class TelegramManager:
+    """Quản lý kết nối Telegram tập trung, duy trì kết nối persistent tránh overhead kết nối lại liên tục"""
+    def __init__(self):
+        self._loop = None
+        self._thread = None
+        self._client = None
+        self._lock = threading.Lock()
+        self._ready_event = threading.Event()
+        self._start_thread()
+
+    def _start_thread(self):
+        self._thread = threading.Thread(target=self._run_event_loop, daemon=True, name="TelegramManagerLoop")
+        self._thread.start()
+        self._ready_event.wait(timeout=5)
+
+    def _run_event_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._ready_event.set()
+        self._loop.run_forever()
+
+    def run_coro(self, coro, timeout=35):
+        if not self._loop or not self._loop.is_running():
+            self._start_thread()
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
+    async def get_client(self):
+        if TelegramClient is None:
+            return None
+        api_id_val = os.environ.get("TG_API_ID", 0)
+        api_hash_val = os.environ.get("TG_API_HASH", "")
+        if not api_id_val or not api_hash_val:
+            return None
+        try:
+            api_id = int(api_id_val)
+        except ValueError:
+            return None
+        session = get_session_path()
+        if self._client is None:
+            self._client = TelegramClient(session, api_id, api_hash_val, timeout=12)
+        if not self._client.is_connected():
+            await self._client.connect()
+        return self._client
+
+    async def is_authorized(self):
+        client = await self.get_client()
+        if not client:
+            return False
+        return await client.is_user_authorized()
+
+    async def disconnect(self):
+        if self._client is not None:
+            try:
+                if self._client.is_connected():
+                    await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+
+    def disconnect_sync(self):
+        """Đóng kết nối đồng bộ để nhường file session cho Login Modal"""
+        if self._loop and self._loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self.disconnect(), self._loop)
+                future.result(timeout=5)
+            except Exception:
+                pass
+
+    def reset_client(self):
+        self.disconnect_sync()
+
+    def shutdown(self):
+        self.disconnect_sync()
+        if self._loop and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except Exception:
+                pass
+
+TG_MANAGER = TelegramManager()
 
 TG_GETLINK_BOT_USERNAME = "@loginlinkjm_bot"  # Bot GetLoginLink
 RE_NETFLIX_LINK = re.compile(r'(https?://(?:www\.)?netflix\.com/\S+)', flags=re.I)
@@ -424,6 +543,7 @@ def draw_rounded_rect(canvas, x1, y1, x2, y2, radius=10, **kwargs):
 # ==========================================
 class TelegramLoginModal:
     def __init__(self, parent_app):
+        TG_MANAGER.disconnect_sync()
         self.app = parent_app
         self.top = tk.Toplevel(self.app.root)
         self.top.title("Đăng nhập Telegram")
@@ -574,6 +694,7 @@ class TelegramLoginModal:
             self.top.after(0, lambda: self.set_ui_state(False, f"Sai mật khẩu 2FA: {str(e)[:38]}"))
 
     def _on_success(self):
+        TG_MANAGER.reset_client()
         self.app.play_sound()
         self.app.check_telegram_connection()
         self.app.set_banner_status("Đăng nhập thành công!", "Tài khoản Telegram đã sẵn sàng", mode="success")
@@ -764,9 +885,9 @@ class ModernNetflixApp:
         self.cmd_queue = queue.Queue()
         self.ready_session = None
         
-        self._cskh_timer = None
-        self._tv_timer = None
-        self._getcode_timer = None
+        self._cskh_timer = CountdownTimer(self.root)
+        self._tv_timer = CountdownTimer(self.root)
+        self._getcode_timer = CountdownTimer(self.root)
         
         self._feedback_win = None
         self._template_win = None
@@ -810,6 +931,8 @@ class ModernNetflixApp:
     def _on_app_close(self):
         try: self.cmd_queue.put({"action": "quit"})
         except Exception: pass
+        try: TG_MANAGER.shutdown()
+        except Exception: pass
         self.root.after(200, self.root.destroy)
 
     def _clear_getcode_input(self):
@@ -826,35 +949,26 @@ class ModernNetflixApp:
 
     def _start_getcode_error_countdown(self, main_err, sub_err, seconds_left=5):
         """Đếm ngược xoá ô Get CODE/LINK khi dán dữ liệu sai hoặc API báo lỗi"""
-        if getattr(self, "_getcode_timer", None) is not None:
-            self.root.after_cancel(self._getcode_timer)
-            self._getcode_timer = None
-        
-        if seconds_left > 0:
-            self.set_banner_status(main_err, f"{sub_err} (Xóa sau {seconds_left}s)", mode="error")
-            self._getcode_timer = self.root.after(1000, lambda: self._start_getcode_error_countdown(main_err, sub_err, seconds_left - 1))
-        else:
+        def _on_tick(sec):
+            self.set_banner_status(main_err, f"{sub_err} (Xóa sau {sec}s)", mode="error")
+        def _on_done():
             self._clear_getcode_input()
             self.set_banner_status("Sẵn sàng", "Hãy dán dữ liệu hợp lệ tiếp theo", mode="success")
+        self._getcode_timer.start(seconds_left, _on_tick, _on_done)
 
     def _start_getcode_clear_countdown(self, main_msg, sub_msg, seconds_left=5):
         """Đếm ngược xoá ô Get CODE/LINK sau khi lấy link/code thành công"""
-        if getattr(self, "_getcode_timer", None) is not None:
-            self.root.after_cancel(self._getcode_timer)
-            self._getcode_timer = None
-            
-        if seconds_left > 0:
-            self.set_banner_status(main_msg, f"{sub_msg} (Xoá sau {seconds_left}s)", mode="success")
-            self._getcode_timer = self.root.after(1000, lambda: self._start_getcode_clear_countdown(main_msg, sub_msg, seconds_left - 1))
-        else:
+        def _on_tick(sec):
+            self.set_banner_status(main_msg, f"{sub_msg} (Xoá sau {sec}s)", mode="success")
+        def _on_done():
             self._clear_getcode_input()
             self.set_banner_status("Sẵn sàng", "Hãy dán dữ liệu tiếp theo", mode="success")
+        self._getcode_timer.start(seconds_left, _on_tick, _on_done)
 
     def _toggle_sub_mode(self):
         """Nút chuyển đổi chế độ CODE và LINK"""
         if getattr(self, "_getcode_timer", None) is not None:
-            self.root.after_cancel(self._getcode_timer)
-            self._getcode_timer = None
+            self._getcode_timer.cancel()
             
         self.sub_mode = "LINK" if self.sub_mode == "CODE" else "CODE"
         title_new = "Get CODE" if self.sub_mode == "CODE" else "Get LINK"
@@ -904,7 +1018,7 @@ class ModernNetflixApp:
 
         # 2. KHỐI TRÊN PHẢI: Log CODE & Các Icon
         draw_rounded_rect(self.cv, self.S(322), self.S(36), self.S(844), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cv.create_text(self.S(338), self.S(66), text="Log COADE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cv.create_text(self.S(338), self.S(66), text="Log CODE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # === BỘ MENU TẮT MỞ KHI CLICK [+] / [-] ===
         btn_tg_x, btn_tg_w = 786, 42
@@ -1555,9 +1669,6 @@ class ModernNetflixApp:
 
     def _fetch_code_from_bot_thread(self, email: str):
         try:
-            api_id = int(os.environ.get("TG_API_ID", 0))
-            api_hash = os.environ.get("TG_API_HASH", "")
-            session = get_session_path()
             bot_target = os.environ.get("TG_BOT_USERNAME", "").strip()
             if not bot_target:
                 self.root.after(0, lambda: self._finish_getcode(None, "Thiếu TG_BOT_USERNAME trong cấu hình"))
@@ -1565,15 +1676,14 @@ class ModernNetflixApp:
             if bot_target.lstrip("-").isdigit(): bot_target = int(bot_target)
 
             async def _communicate():
-                client = TelegramClient(session, api_id, api_hash, timeout=10)
+                client = await TG_MANAGER.get_client()
+                if not client or not await client.is_user_authorized():
+                    self.tg_authorized = False
+                    self.tg_status_text = "Telegram: Click để đăng nhập"
+                    self.tg_status_color = "#F59E0B"
+                    self.root.after(0, lambda: self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color))
+                    return None, "Phiên Telegram hết hạn, hãy bấm đăng nhập lại"
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=8.0)
-                    if not await client.is_user_authorized():
-                        self.tg_authorized = False
-                        self.tg_status_text = "Telegram: Click để đăng nhập"
-                        self.tg_status_color = "#F59E0B"
-                        self.root.after(0, lambda: self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color))
-                        return None, "Phiên Telegram hết hạn, hãy bấm đăng nhập lại"
                     self.root.after(0, lambda: self.set_banner_status("Đang tìm Bot Telegram", f"{bot_target}", mode="loading"))
                     entity = await asyncio.wait_for(client.get_entity(bot_target), timeout=8.0)
                     self.root.after(0, lambda: self.set_banner_status("Đang gửi lệnh", f"/getcode {email}", mode="loading"))
@@ -1598,31 +1708,29 @@ class ModernNetflixApp:
                     return None, "Bot Telegram không phản hồi sau 20s"
                 except asyncio.TimeoutError:
                     return None, f"Hết thời gian chờ khi kết nối tới {bot_target}"
-                finally:
-                    await client.disconnect()
-            code_result, full_reply = asyncio.run(_communicate())
+                except Exception as ex:
+                    await TG_MANAGER.disconnect()
+                    raise ex
+
+            code_result, full_reply = TG_MANAGER.run_coro(_communicate())
             self.root.after(0, lambda: self._finish_getcode(code_result, full_reply))
         except Exception as e:
             self.root.after(0, lambda: self._finish_getcode(None, f"Lỗi: {e}"))
 
     def _fetch_link_from_bot_thread(self, payload_text: str):
         try:
-            api_id = int(os.environ.get("TG_API_ID", 0))
-            api_hash = os.environ.get("TG_API_HASH", "")
-            session = get_session_path()
             bot_target = TG_GETLINK_BOT_USERNAME
 
             async def _communicate():
-                client = TelegramClient(session, api_id, api_hash, timeout=12)
+                client = await TG_MANAGER.get_client()
+                if not client or not await client.is_user_authorized():
+                    self.tg_authorized = False
+                    self.tg_status_text = "Telegram: Click để đăng nhập"
+                    self.tg_status_color = "#F59E0B"
+                    self.root.after(0, lambda: self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color))
+                    return None, "Phiên Telegram hết hạn, hãy bấm đăng nhập lại"
+                
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=8.0)
-                    if not await client.is_user_authorized():
-                        self.tg_authorized = False
-                        self.tg_status_text = "Telegram: Click để đăng nhập"
-                        self.tg_status_color = "#F59E0B"
-                        self.root.after(0, lambda: self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color))
-                        return None, "Phiên Telegram hết hạn, hãy bấm đăng nhập lại"
-                    
                     self.root.after(0, lambda: self.set_banner_status("Đang tìm GetLoginLink Bot", f"{bot_target}", mode="loading"))
                     entity = await asyncio.wait_for(client.get_entity(bot_target), timeout=8.0)
 
@@ -1668,10 +1776,11 @@ class ModernNetflixApp:
                     return None, "Bot GetLoginLink không phản hồi sau 25s"
                 except asyncio.TimeoutError:
                     return None, f"Hết thời gian chờ kết nối tới {bot_target}"
-                finally:
-                    await client.disconnect()
+                except Exception as ex:
+                    await TG_MANAGER.disconnect()
+                    raise ex
 
-            link_result, full_reply = asyncio.run(_communicate())
+            link_result, full_reply = TG_MANAGER.run_coro(_communicate())
             self.root.after(0, lambda: self._finish_getlink(link_result, full_reply))
         except Exception as e:
             self.root.after(0, lambda: self._finish_getlink(None, f"Lỗi: {e}"))
@@ -1715,17 +1824,7 @@ class ModernNetflixApp:
             self._telegram_status_update("Telegram: Thiếu thư viện", False)
             return
         try:
-            api_id = int(os.environ["TG_API_ID"])
-            api_hash = os.environ["TG_API_HASH"]
-            session = get_session_path()
-            async def check():
-                client = TelegramClient(session, api_id, api_hash)
-                try:
-                    await client.connect()
-                    return await client.is_user_authorized()
-                finally:
-                    await client.disconnect()
-            authorized = asyncio.run(check())
+            authorized = TG_MANAGER.run_coro(TG_MANAGER.is_authorized(), timeout=10)
             if authorized: self._telegram_status_update("Telegram: Đã kết nối ✓", True)
             else: self._telegram_status_update("Telegram: Click để đăng nhập", False)
         except Exception:
@@ -1890,9 +1989,8 @@ class ModernNetflixApp:
         return "break"
 
     def _process_tv_link(self):
-        if self._tv_timer is not None:
-            self.root.after_cancel(self._tv_timer)
-            self._tv_timer = None
+        if getattr(self, "_tv_timer", None) is not None:
+            self._tv_timer.cancel()
         raw = self.tv_input_text.get("1.0", "end").strip()
         if not raw or raw in ("Nhập link ạ...", "Nhập link ạ....", "Nhập link..."): return
         source_type, cookies_list = parse_input_source(raw)
@@ -1915,37 +2013,24 @@ class ModernNetflixApp:
         self.set_banner_status(f"Đang gửi mã {code}", "Đang kích hoạt thiết bị trên Netflix", mode="loading")
         self.cmd_queue.put({"action": "submit", "code": code})
 
+    def _clear_tv_input(self):
+        self.tv_input_text.delete("1.0", "end")
+        self.tv_placeholder_active = True
+        self.tv_input_text.config(fg=self.TEXT_MUTED)
+        self.tv_input_text.insert("1.0", "Nhập link ạ...")
+        self._set_code_input_state(False)
+        self.root.focus_set()
+        self.set_banner_status("Sẵn sàng", "Hãy dán JSON hoặc Metadata tiếp theo", mode="success")
+
     def _start_tv_clear_countdown(self, seconds_left=5):
-        if self._tv_timer is not None:
-            self.root.after_cancel(self._tv_timer)
-            self._tv_timer = None
-        if seconds_left > 0:
-            self.set_banner_status("Submit Code DONE", f"Tự động xoá dữ liệu sau {seconds_left}s", mode="success")
-            self._tv_timer = self.root.after(1000, lambda: self._start_tv_clear_countdown(seconds_left - 1))
-        else:
-            self.tv_input_text.delete("1.0", "end")
-            self.tv_placeholder_active = True
-            self.tv_input_text.config(fg=self.TEXT_MUTED)
-            self.tv_input_text.insert("1.0", "Nhập link ạ...")
-            self._set_code_input_state(False)
-            self.root.focus_set()
-            self.set_banner_status("Sẵn sàng", "Hãy dán JSON hoặc Metadata tiếp theo", mode="success")
+        def _on_tick(sec):
+            self.set_banner_status("Submit Code DONE", f"Tự động xoá dữ liệu sau {sec}s", mode="success")
+        self._tv_timer.start(seconds_left, _on_tick, self._clear_tv_input)
 
     def _start_tv_error_countdown(self, main_err="Lỗi Log CODE", sub_err="", seconds_left=5):
-        if self._tv_timer is not None:
-            self.root.after_cancel(self._tv_timer)
-            self._tv_timer = None
-        if seconds_left > 0:
-            self.set_banner_status(main_err, f"{sub_err} Tự động xoá dữ liệu sau {seconds_left}s ạ!", mode="error")
-            self._tv_timer = self.root.after(1000, lambda: self._start_tv_error_countdown(main_err, sub_err, seconds_left - 1))
-        else:
-            self.tv_input_text.delete("1.0", "end")
-            self.tv_placeholder_active = True
-            self.tv_input_text.config(fg=self.TEXT_MUTED)
-            self.tv_input_text.insert("1.0", "Nhập link ạ...")
-            self._set_code_input_state(False)
-            self.root.focus_set()
-            self.set_banner_status("Sẵn sàng", "Hãy dán JSON hoặc Metadata tiếp theo", mode="success")
+        def _on_tick(sec):
+            self.set_banner_status(main_err, f"{sub_err} Tự động xoá dữ liệu sau {sec}s ạ!", mode="error")
+        self._tv_timer.start(seconds_left, _on_tick, self._clear_tv_input)
 
     def _on_cskh_paste(self, event=None):
         if getattr(self, "_cskh_processing", False): return "break"
@@ -1977,38 +2062,31 @@ class ModernNetflixApp:
         finally:
             self.root.after(200, lambda: setattr(self, "_cskh_processing", False))
 
+    def _clear_cskh_input(self):
+        self.cv.itemconfig(self.cskh_title_text, text="Format DATA", fill=self.TEXT_WHITE)
+        self.cskh_input_text.delete("1.0", "end")
+        self.cskh_placeholder_active = True
+        self.cskh_input_text.config(fg=self.TEXT_MUTED)
+        self.cskh_input_text.insert("1.0", "Nhập thông tin ạ...")
+        self.root.focus_set()
+
     def _start_cskh_clear_countdown(self, seconds_left=5):
-        if self._cskh_timer is not None:
-            self.root.after_cancel(self._cskh_timer)
-            self._cskh_timer = None
-        if seconds_left > 0:
-            self.cv.itemconfig(self.cskh_title_text, text=f"Chuẩn hoá ({seconds_left}s)", fill="#38BDF8")
-            self.set_banner_status("Đã chuẩn hoá & Tự động Copy", f"Tự xoá sau {seconds_left} ạ", mode="success")
-            self._cskh_timer = self.root.after(1000, lambda: self._start_cskh_clear_countdown(seconds_left - 1))
-        else:
-            self.cv.itemconfig(self.cskh_title_text, text="Format DATA", fill=self.TEXT_WHITE)
-            self.cskh_input_text.delete("1.0", "end")
-            self.cskh_placeholder_active = True
-            self.cskh_input_text.config(fg=self.TEXT_MUTED)
-            self.cskh_input_text.insert("1.0", "Nhập thông tin ạ...")
-            self.root.focus_set()
+        def _on_tick(sec):
+            self.cv.itemconfig(self.cskh_title_text, text=f"Chuẩn hoá ({sec}s)", fill="#38BDF8")
+            self.set_banner_status("Đã chuẩn hoá & Tự động Copy", f"Tự xoá sau {sec}s ạ", mode="success")
+        def _on_done():
+            self._clear_cskh_input()
             self.set_banner_status("Đã xoá ô Format DATA", "Sẵn sàng nhận dữ liệu tiếp theo", mode="success")
+        self._cskh_timer.start(seconds_left, _on_tick, _on_done)
 
     def _start_cskh_error_countdown(self, seconds_left=5):
-        if self._cskh_timer is not None:
-            self.root.after_cancel(self._cskh_timer)
-            self._cskh_timer = None
         self.cv.itemconfig(self.cskh_title_text, text="Format DATA", fill=self.TEXT_WHITE)
-        if seconds_left > 0:
-            self.set_banner_status("Sai định dạng CSKH", f"Tự động xoá dữ liệu sau {seconds_left}s ạ!", mode="error")
-            self._cskh_timer = self.root.after(1000, lambda: self._start_cskh_error_countdown(seconds_left - 1))
-        else:
-            self.cskh_input_text.delete("1.0", "end")
-            self.cskh_placeholder_active = True
-            self.cskh_input_text.config(fg=self.TEXT_MUTED)
-            self.cskh_input_text.insert("1.0", "Nhập thông tin ạ...")
-            self.root.focus_set()
+        def _on_tick(sec):
+            self.set_banner_status("Sai định dạng CSKH", f"Tự động xoá dữ liệu sau {sec}s ạ!", mode="error")
+        def _on_done():
+            self._clear_cskh_input()
             self.set_banner_status("Sẵn sàng", "Hãy dán thông tin CSKH, link TV8 hoặc email", mode="success")
+        self._cskh_timer.start(seconds_left, _on_tick, _on_done)
 
     async def _launch_smart_browser(self, p, headless):
         args = ["--window-size=520,440", "--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-sandbox", "--disable-background-networking", "--disable-sync", "--disable-translate", "--mute-audio"]
