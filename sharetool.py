@@ -13,6 +13,74 @@ import urllib.parse
 import platform
 from tkinter import messagebox
 
+# Danh sách đầy đủ 4 file trên GitHub của bạn
+BASE_URL = "https://raw.githubusercontent.com/hoanmihjob/Netfix_VeoVeo/main/"
+FILES_TO_SYNC = [
+    "sharetool.py",
+    "templates.json",
+    "startup.mp3",
+    "alert.aiff"
+]
+
+def check_update_available():
+    """Kiểm tra xem có file nào khác biệt trên GitHub hay không (chỉ đọc, không ghi đè)"""
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        for file_name in FILES_TO_SYNC:
+            local_path = os.path.join(current_dir, file_name)
+            remote_url = BASE_URL + file_name
+            try:
+                req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    remote_data = resp.read()
+            except Exception:
+                continue
+
+            if not remote_data:
+                continue
+
+            local_data = b""
+            if os.path.exists(local_path):
+                with open(local_path, "rb") as f:
+                    local_data = f.read()
+
+            if not os.path.exists(local_path):
+                return True
+            elif file_name.endswith((".py", ".json")):
+                norm_remote = remote_data.replace(b"\r\n", b"\n").strip()
+                norm_local = local_data.replace(b"\r\n", b"\n").strip()
+                if norm_remote != norm_local:
+                    return True
+            else:
+                if remote_data != local_data:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def apply_full_update():
+    """Tải đè file mới và khởi động lại ứng dụng"""
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        for file_name in FILES_TO_SYNC:
+            local_path = os.path.join(current_dir, file_name)
+            remote_url = BASE_URL + file_name
+            req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                remote_data = resp.read()
+            if remote_data:
+                with open(local_path, "wb") as f:
+                    f.write(remote_data)
+        
+        # Khởi động lại tool
+        python_bin = sys.executable
+        if "python" in os.path.basename(python_bin).lower():
+            os.execv(python_bin, [python_bin] + sys.argv)
+        else:
+            os.execv(python_bin, sys.argv)
+    except Exception as e:
+        messagebox.showerror("Lỗi Update", f"Không thể cập nhật: {e}")
+
 # Kích hoạt DPI Awareness cho Windows để chống mờ/méo giao diện
 if sys.platform == "win32":
     import ctypes
@@ -36,10 +104,14 @@ except ImportError:
     SessionPasswordNeededError = Exception
 
 # ==========================================
-# CẤU HÌNH BOT FEEDBACK TELEGRAM
+# CẤU HÌNH BOT TELEGRAM
 # ==========================================
 FEEDBACK_BOT_TOKEN = "9036345671:AAEfxAK2-JuI3mBSQMJourgOfgMORlmXqCs"
-FEEDBACK_CHAT_ID = "8559042403"  # <-- Thay Chat ID của bạn vào đây
+FEEDBACK_CHAT_ID = "8559042403"
+
+TG_GETLINK_BOT_USERNAME = "@loginlinkjm_bot"  # Bot GetLoginLink
+RE_NETFLIX_LINK = re.compile(r'(https?://(?:www\.)?netflix\.com/\S+)', flags=re.I)
+RE_HTTP_LINK = re.compile(r'(https?://\S+)', flags=re.I)
 
 # ==========================================
 # BIÊN DỊCH TRƯỚC REGEX
@@ -446,7 +518,7 @@ class TelegramLoginModal:
     def _on_success(self):
         self.app.play_sound()
         self.app.check_telegram_connection()
-        self.app.set_banner_status("Đăng nhập thành công!", "Tài khoản Telegram đã sẵn sàng lấy code", mode="success")
+        self.app.set_banner_status("Đăng nhập thành công!", "Tài khoản Telegram đã sẵn sàng", mode="success")
         self.top.destroy()
 
 
@@ -473,6 +545,7 @@ class ModernNetflixApp:
     BADGE_TEXT = "#111827"
 
     def __init__(self, root):
+        self.sub_mode = "LINK"  # ĐẶT LINK LÀM MẶC ĐỊNH
         self.root = root
         self.root.title("Netflix Vèo Vèo")
         self.root.minsize(880, 457)
@@ -481,15 +554,22 @@ class ModernNetflixApp:
         self.root.resizable(True, True)
         self.root.configure(bg=self.BG_WINDOW)
 
+        self.has_update = False
+        threading.Thread(target=self._check_update_background, daemon=True).start()
         self.UI_SCALE = 1.0  
-        self.is_muted = False  # Trạng thái Âm thanh (False = Đang bật, True = Tắt tiếng)
+        self.is_muted = False
 
         load_custom_templates()
 
         self.cmd_queue = queue.Queue()
         self.ready_session = None
+        
         self._cskh_timer = None
         self._tv_timer = None
+        self._getcode_timer = None
+        
+        self._feedback_win = None
+        self._template_win = None
 
         self.show_chrome = False
         self.code_enabled = False
@@ -516,59 +596,86 @@ class ModernNetflixApp:
     def S(self, val): return int(val * getattr(self, 'UI_SCALE', 1.0))
     def F(self, val): return int(val * getattr(self, 'UI_SCALE', 1.0))
 
-    def _toggle_zoom(self, event=None):
-        current_scale = getattr(self, 'UI_SCALE', 1.0)
-        self.UI_SCALE = 1.5 if current_scale == 1.0 else 1.0
+    def _check_update_background(self):
+        if check_update_available():
+            self.has_update = True
+            def _show_dot():
+                if getattr(self, "menu_is_open", False):
+                    self.cv.itemconfig(self.update_dot, state="normal")
+            self.root.after(0, _show_dot)
 
-        cskh_val = self.cskh_input_text.get("1.0", "end-1c")
-        tv_val = self.tv_input_text.get("1.0", "end-1c")
-        code_val = self.code_var.get()
-        getcode_val = self.getcode_email.get()
-        
-        if hasattr(self, 'wrapper'): self.wrapper.destroy()
-        self._build_canvas_ui()
-
-        if cskh_val and cskh_val != "Nhập thông tin ạ...":
-            self.cskh_input_text.delete("1.0", "end")
-            self.cskh_input_text.insert("1.0", cskh_val)
-            self.cskh_input_text.config(fg=self.TEXT_WHITE)
-            self.cskh_placeholder_active = False
-
-        if tv_val and tv_val != "Nhập link ạ...":
-            self.tv_input_text.delete("1.0", "end")
-            self.tv_input_text.insert("1.0", tv_val)
-            self.tv_input_text.config(fg=self.TEXT_WHITE)
-            self.tv_placeholder_active = False
-
-        if code_val and code_val != "Nhập code ạ...": self.code_var.set(code_val)
-        if getcode_val and getcode_val != "Nhập email ạ...":
-            self.getcode_entry.delete(0, "end")
-            self.getcode_entry.insert(0, getcode_val)
-            self.getcode_entry.config(fg=self.TEXT_WHITE)
-            self.getcode_placeholder_active = False
-
-        self._apply_getcode_state()
-        self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color)
-        
-        if getattr(self, "show_chrome", False):
-            self.cv.itemconfig(self.btn_show_rect, outline="#38BDF8")
-            self.cv.itemconfig(self.btn_show_text, fill="#38BDF8")
-            
-        if self.is_muted:
-            self.cv.itemconfig(self.btn_snd_text, text="Mute", fill=self.TEXT_MUTED)
-            self.cv.itemconfig(self.btn_snd_rect, outline=self.BORDER_CARD)
-
-        if getattr(self, "UI_SCALE", 1.0) > 1.0:
-            self.cv.itemconfig(self.btn_zm_rect, outline="#38BDF8")
-            self.cv.itemconfig(self.btn_zm_text, fill="#38BDF8")
+    def _on_click_update(self, event=None):
+        if self.has_update:
+            msg = "Đã có phiên bản mới trên GitHub!\nBạn có muốn cập nhật và khởi động lại ngay không?"
         else:
-            self.cv.itemconfig(self.btn_zm_rect, outline=self.BORDER_CARD)
-            self.cv.itemconfig(self.btn_zm_text, fill=self.TEXT_MUTED)
+            msg = "Chưa phát hiện bản mới (hoặc đã là bản mới nhất).\nBạn có muốn tải lại phiên bản từ GitHub không?"
+
+        confirm = messagebox.askyesno("Xác nhận cập nhật", msg, parent=self.root)
+        if confirm:
+            self.set_banner_status("Đang cập nhật...", "Đang tải file và khởi động lại ứng dụng", mode="loading")
+            self.root.update_idletasks()
+            threading.Thread(target=apply_full_update, daemon=True).start()
 
     def _on_app_close(self):
         try: self.cmd_queue.put({"action": "quit"})
         except Exception: pass
         self.root.after(200, self.root.destroy)
+
+    def _clear_getcode_input(self):
+        """Xoá nội dung ô nhập Get CODE / LINK và đặt lại placeholder mặc định"""
+        try:
+            self.getcode_entry.delete(0, "end")
+            self.getcode_placeholder_active = True
+            placeholder_text = "Nhập email ạ..." if self.sub_mode == "CODE" else "Nhập link/JSON ạ..."
+            self.getcode_entry.insert(0, placeholder_text)
+            self.getcode_entry.configure(fg=self.TEXT_MUTED)
+            self.cv.itemconfig(self.otp_badge_txt, text="______", fill=self.BADGE_TEXT)
+        except Exception:
+            pass
+
+    def _start_getcode_error_countdown(self, main_err, sub_err, seconds_left=5):
+        """Đếm ngược xoá ô Get CODE/LINK khi dán dữ liệu sai hoặc API báo lỗi"""
+        if getattr(self, "_getcode_timer", None) is not None:
+            self.root.after_cancel(self._getcode_timer)
+            self._getcode_timer = None
+        
+        if seconds_left > 0:
+            self.set_banner_status(main_err, f"{sub_err} (Xóa sau {seconds_left}s)", mode="error")
+            self._getcode_timer = self.root.after(1000, lambda: self._start_getcode_error_countdown(main_err, sub_err, seconds_left - 1))
+        else:
+            self._clear_getcode_input()
+            self.set_banner_status("Sẵn sàng", "Hãy dán dữ liệu hợp lệ tiếp theo", mode="success")
+
+    def _start_getcode_clear_countdown(self, main_msg, sub_msg, seconds_left=5):
+        """Đếm ngược xoá ô Get CODE/LINK sau khi lấy link/code thành công"""
+        if getattr(self, "_getcode_timer", None) is not None:
+            self.root.after_cancel(self._getcode_timer)
+            self._getcode_timer = None
+            
+        if seconds_left > 0:
+            self.set_banner_status(main_msg, f"{sub_msg} (Xoá sau {seconds_left}s)", mode="success")
+            self._getcode_timer = self.root.after(1000, lambda: self._start_getcode_clear_countdown(main_msg, sub_msg, seconds_left - 1))
+        else:
+            self._clear_getcode_input()
+            self.set_banner_status("Sẵn sàng", "Hãy dán dữ liệu tiếp theo", mode="success")
+
+    def _toggle_sub_mode(self):
+        """Nút chuyển đổi chế độ CODE và LINK"""
+        if getattr(self, "_getcode_timer", None) is not None:
+            self.root.after_cancel(self._getcode_timer)
+            self._getcode_timer = None
+            
+        self.sub_mode = "LINK" if self.sub_mode == "CODE" else "CODE"
+        title_new = "Get CODE" if self.sub_mode == "CODE" else "Get LINK"
+        mode_btn_text = "LINK" if self.sub_mode == "LINK" else "CODE"
+        
+        self.cv.itemconfig(self.getcode_title_label, text=title_new)
+        self.cv.itemconfig(self.btn_submode_text, text=mode_btn_text)
+        if not getattr(self, "_getcode_running", False):
+            self.cv.itemconfig(self.getcode_button_label, text="GET")
+
+        self._clear_getcode_input()
+        self.set_banner_status("Đã chuyển chế độ", f"Sẵn sàng lấy {self.sub_mode}", mode="success")
 
     def _build_canvas_ui(self):
         self.wrapper = tk.Frame(self.root, bg=self.BG_WINDOW)
@@ -616,13 +723,13 @@ class ModernNetflixApp:
         
         # BỘ 4 NÚT (Ẩn mặc định)
         btn_snd_w = 56
-        btn_snd_x = btn_tg_x - btn_snd_w - 10 # 720
+        btn_snd_x = btn_tg_x - btn_snd_w - 10
         btn_sh_w = 56
-        btn_sh_x = btn_snd_x - btn_sh_w - 10  # 654
+        btn_sh_x = btn_snd_x - btn_sh_w - 10
         btn_zm_w = 56
-        btn_zm_x = btn_sh_x - btn_zm_w - 10   # 588
+        btn_zm_x = btn_sh_x - btn_zm_w - 10
         btn_fb_w = 78
-        btn_fb_x = btn_zm_x - btn_fb_w - 10   # 500
+        btn_fb_x = btn_zm_x - btn_fb_w - 10
         
         # Nút Sound/Mute
         snd_txt = "Mute" if self.is_muted else "Sound"
@@ -646,16 +753,21 @@ class ModernNetflixApp:
             self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(self.btn_show_rect, outline="#38BDF8"), self.cv.itemconfig(self.btn_show_text, fill="#38BDF8" if self.show_chrome else self.TEXT_WHITE)))
             self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(self.btn_show_rect, outline="#38BDF8" if self.show_chrome else self.BORDER_CARD), self.cv.itemconfig(self.btn_show_text, fill="#38BDF8" if self.show_chrome else self.TEXT_MUTED)))
 
-        # Nút Zoom
-        zm_outline = "#38BDF8" if getattr(self, "UI_SCALE", 1.0) > 1.0 else self.BORDER_CARD
-        zm_color = "#38BDF8" if getattr(self, "UI_SCALE", 1.0) > 1.0 else self.TEXT_MUTED
-        self.btn_zm_rect = draw_rounded_rect(self.cv, self.S(btn_zm_x), self.S(54), self.S(btn_zm_x + btn_zm_w), self.S(78), radius=self.S(6), fill=self.BG_CARD, outline=zm_outline, width=1.2, tags=("menu_btns",))
-        self.btn_zm_text = self.cv.create_text(self.S(btn_zm_x + btn_zm_w // 2), self.S(66), text="Zoom", fill=zm_color, font=("Arial", self.F(12)), anchor="center", tags=("menu_btns",))
-        hit_zm = self.cv.create_rectangle(self.S(btn_zm_x), self.S(54), self.S(btn_zm_x + btn_zm_w), self.S(78), fill="", outline="", tags=("menu_btns",))
-        for itm in (self.btn_zm_rect, self.btn_zm_text, hit_zm):
-            self.cv.tag_bind(itm, "<Button-1>", self._toggle_zoom)
-            self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(self.btn_zm_rect, outline="#38BDF8"), self.cv.itemconfig(self.btn_zm_text, fill="#38BDF8" if getattr(self, "UI_SCALE", 1.0) > 1.0 else self.TEXT_WHITE)))
-            self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(self.btn_zm_rect, outline="#38BDF8" if getattr(self, "UI_SCALE", 1.0) > 1.0 else self.BORDER_CARD), self.cv.itemconfig(self.btn_zm_text, fill="#38BDF8" if getattr(self, "UI_SCALE", 1.0) > 1.0 else self.TEXT_MUTED)))
+        # Nút Update
+        btn_up_w = 56
+        btn_up_x = btn_sh_x - btn_up_w - 10
+        self.btn_update_rect = draw_rounded_rect(self.cv, self.S(btn_up_x), self.S(54), self.S(btn_up_x + btn_up_w), self.S(78), radius=self.S(6), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.2, tags=("menu_btns",))
+        self.btn_update_text = self.cv.create_text(self.S(btn_up_x + btn_up_w // 2), self.S(66), text="Update", fill=self.TEXT_MUTED, font=("Arial", self.F(12)), anchor="center", tags=("menu_btns",))
+        hit_update = self.cv.create_rectangle(self.S(btn_up_x), self.S(54), self.S(btn_up_x + btn_up_w), self.S(78), fill="", outline="", tags=("menu_btns",))
+
+        dot_r = self.S(3.5)
+        dot_x, dot_y = self.S(btn_up_x + btn_up_w - 3), self.S(58)
+        self.update_dot = self.cv.create_oval(dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r, fill="#EF4444", outline="", state="hidden", tags=("menu_btns", "update_badge"))
+
+        for itm in (self.btn_update_rect, self.btn_update_text, hit_update):
+            self.cv.tag_bind(itm, "<Button-1>", self._on_click_update)
+            self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(self.btn_update_rect, outline="#38BDF8"), self.cv.itemconfig(self.btn_update_text, fill=self.TEXT_WHITE)))
+            self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(self.btn_update_rect, outline=self.BORDER_CARD), self.cv.itemconfig(self.btn_update_text, fill=self.TEXT_MUTED)))
 
         # Nút Feedback
         self.btn_fb_rect = draw_rounded_rect(self.cv, self.S(btn_fb_x), self.S(54), self.S(btn_fb_x + btn_fb_w), self.S(78), radius=self.S(6), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.2, tags=("menu_btns",))
@@ -674,6 +786,8 @@ class ModernNetflixApp:
             self.menu_is_open = not self.menu_is_open
             if self.menu_is_open:
                 self.cv.itemconfigure("menu_btns", state="normal")
+                if not getattr(self, "has_update", False):
+                    self.cv.itemconfig(self.update_dot, state="hidden")
                 self.cv.itemconfig(self.btn_tg_text, text="-", fill="#38BDF8")
                 self.cv.itemconfig(self.btn_tg_rect, outline="#38BDF8")
             else:
@@ -685,7 +799,6 @@ class ModernNetflixApp:
             self.cv.tag_bind(itm, "<Button-1>", _toggle_menu)
             self.cv.tag_bind(itm, "<Enter>", lambda e: self.cv.itemconfig(self.btn_tg_text, fill="#38BDF8" if not self.menu_is_open else self.TEXT_WHITE))
             self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(self.btn_tg_text, fill="#38BDF8" if self.menu_is_open else self.TEXT_MUTED))
-
 
         self.tv_input_box = draw_rounded_rect(self.cv, self.S(338), self.S(92), self.S(576), self.S(242), radius=self.S(10), fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5)
         self.tv_input_text = tk.Text(self.cv, bg=self.BG_INPUT, fg=self.TEXT_MUTED, insertbackground=self.BG_INPUT, font=("Arial", self.F(14)), bd=0, highlightthickness=0, wrap="word")
@@ -719,39 +832,64 @@ class ModernNetflixApp:
             self.cv.tag_bind(item, "<Enter>", self._on_submit_hover_in)
             self.cv.tag_bind(item, "<Leave>", self._on_submit_hover_out)
 
-        # 3. KHỐI GIỮA: Get CODE (Telegram OTP)
+        # 3. KHỐI GIỮA: Get CODE / Get LINK
         self.getcode_card = draw_rounded_rect(self.cv, self.S(36), self.S(278), self.S(844), self.S(420), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
+        
+        # Mũi tên và Tiêu đề: CHỨC NĂNG THU GỌN / MỞ RỘNG
         self.toggle_icon = self.cv.create_text(self.S(52), self.S(303), text="▶", fill=self.TEXT_WHITE, font=("Arial", self.F(13)), anchor="w")
-        self.getcode_title_label = self.cv.create_text(self.S(74), self.S(303), text="Get CODE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        title_init = "Get CODE" if self.sub_mode == "CODE" else "Get LINK"
+        self.getcode_title_label = self.cv.create_text(self.S(74), self.S(303), text=title_init, fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+
+        for item in (self.toggle_icon, self.getcode_title_label):
+            self.cv.tag_bind(item, "<Button-1>", self._toggle_getcode)
+            self.cv.tag_bind(item, "<Enter>", lambda e: self.cv.itemconfig(self.getcode_title_label, fill="#38BDF8"))
+            self.cv.tag_bind(item, "<Leave>", lambda e: self.cv.itemconfig(self.getcode_title_label, fill=self.TEXT_WHITE))
+
+        # Telegram Status
         self.telegram_status = self.cv.create_text(self.S(824), self.S(303), text=self.tg_status_text, fill=self.tg_status_color, font=("Arial", self.F(14), "bold"), anchor="e")
         self.cv.tag_bind(self.telegram_status, "<Button-1>", self._on_telegram_status_click)
-        toggle_hit = self.cv.create_rectangle(self.S(36), self.S(278), self.S(520), self.S(328), fill="", outline="")
-        for item in (self.toggle_icon, self.getcode_title_label, toggle_hit):
-            self.cv.tag_bind(item, "<Button-1>", self._toggle_getcode)
 
-        self.getcode_input_rect = draw_rounded_rect(self.cv, self.S(52), self.S(336), self.S(576), self.S(402), radius=self.S(10), fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5, tags=("getcode_content",))
+        # --- NỘI DUNG BÊN TRONG CỦA THẺ GET CODE / GET LINK (3 Ô HÀNG DƯỚI) ---
+        # Ô 1 (Bên trái): Chỉ hiển thị "CODE" hoặc "LINK" (Click để chuyển chế độ)
+        mode_btn_text = "LINK" if self.sub_mode == "LINK" else "CODE"
+        self.btn_submode_rect = draw_rounded_rect(self.cv, self.S(52), self.S(344), self.S(172), self.S(404), radius=self.S(10), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5, tags=("getcode_content",))
+        self.btn_submode_text = self.cv.create_text(self.S(112), self.S(374), text=mode_btn_text, fill=self.TEXT_WHITE, font=("Arial", self.F(14), "bold"), anchor="center", tags=("getcode_content",))
+        hit_submode_btn = self.cv.create_rectangle(self.S(52), self.S(344), self.S(172), self.S(404), fill="", outline="", tags=("getcode_content",))
+        for itm in (self.btn_submode_rect, self.btn_submode_text, hit_submode_btn):
+            self.cv.tag_bind(itm, "<Button-1>", lambda e: self._toggle_sub_mode())
+            self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(self.btn_submode_rect, outline=self.BORDER_ACTIVE), self.cv.itemconfig(self.btn_submode_text, fill="#38BDF8")))
+            self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(self.btn_submode_rect, outline=self.BORDER_CARD), self.cv.itemconfig(self.btn_submode_text, fill=self.TEXT_WHITE)))
+
+        # Ô 2 (Ở giữa): Ô NHẬP LIỆU (Email / Link / JSON)
+        self.getcode_input_rect = draw_rounded_rect(self.cv, self.S(184), self.S(344), self.S(684), self.S(404), radius=self.S(10), fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5, tags=("getcode_content",))
         self.getcode_email = tk.StringVar()
-        self.getcode_entry = tk.Entry(self.cv, textvariable=self.getcode_email, bg=self.BG_INPUT, fg=self.TEXT_MUTED, insertbackground=self.BG_INPUT, font=("Arial", self.F(14)), bd=0, highlightthickness=0)
-        self.getcode_entry.insert(0, "Nhập email ạ...")
+        self.getcode_entry = tk.Entry(self.cv, textvariable=self.getcode_email, bg=self.BG_INPUT, fg=self.TEXT_MUTED, insertbackground=self.TEXT_WHITE, font=("Arial", self.F(14)), bd=0, highlightthickness=0)
+        
+        # Mặc định lấy theo sub_mode
+        placeholder_text = "Nhập email ạ..." if self.sub_mode == "CODE" else "Nhập link/JSON ạ..."
+        self.getcode_entry.insert(0, placeholder_text)
+        self.getcode_placeholder_active = True
+        
         self.getcode_entry.bind("<FocusIn>", self._getcode_focus_in)
         self.getcode_entry.bind("<FocusOut>", self._getcode_focus_out)
         self.getcode_entry.bind("<KeyPress>", self._getcode_keypress)
         self.getcode_entry.bind("<<Paste>>", self._getcode_paste)
         self.getcode_entry.bind("<Command-v>", self._getcode_paste)
         self.getcode_entry.bind("<Control-v>", self._getcode_paste)
-        self.getcode_entry.bind("<Button-2>", lambda e: "break")
-        self.getcode_entry_win = self.cv.create_window(self.S(68), self.S(355), window=self.getcode_entry, width=self.S(405), height=self.S(28), anchor="nw")
+        self.getcode_entry_win = self.cv.create_window(self.S(198), self.S(374), window=self.getcode_entry, width=self.S(472), height=self.S(28), anchor="w", tags=("getcode_content",))
+        self.cv.tag_bind(self.getcode_input_rect, "<Button-1>", lambda e: self.getcode_entry.focus_set())
 
-        self.otp_badge_rect = draw_rounded_rect(self.cv, self.S(484), self.S(351), self.S(560), self.S(387), radius=self.S(8), fill=self.BADGE_WHITE, outline="", tags=("getcode_content",))
-        self.otp_badge_txt = self.cv.create_text(self.S(522), self.S(369), text="______", fill=self.BADGE_TEXT, font=("Arial", self.F(12), "bold"), tags=("getcode_content",))
-
-        self.getcode_button_rect = draw_rounded_rect(self.cv, self.S(592), self.S(336), self.S(828), self.S(402), radius=self.S(10), fill=self.BTN_BG_INACTIVE, outline="", tags=("getcode_content",))
-        self.getcode_button_label = self.cv.create_text(self.S(710), self.S(369), text="Get code", fill=self.BTN_TXT_INACTIVE, font=("Arial", self.F(14), "bold"), tags=("getcode_content",))
-        getcode_button_hit = self.cv.create_rectangle(self.S(592), self.S(336), self.S(828), self.S(402), fill="", outline="", tags=("getcode_content",))
-        for item in (self.getcode_button_rect, self.getcode_button_label, getcode_button_hit):
-            self.cv.tag_bind(item, "<Button-1>", self._getcode_submit)
-            self.cv.tag_bind(item, "<Enter>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill="#2E374A" if not getattr(self, "_getcode_running", False) else "#D97706"))
-            self.cv.tag_bind(item, "<Leave>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE if not getattr(self, "_getcode_running", False) else "#D97706"))
+        # Ô 3 (Bên phải): NÚT "GET" CỐ ĐỊNH CHO CẢ 2 CHẾ ĐỘ
+        self.getcode_button_rect = draw_rounded_rect(self.cv, self.S(696), self.S(344), self.S(828), self.S(404), radius=self.S(10), fill=self.BTN_BG_INACTIVE, outline="", tags=("getcode_content",))
+        self.getcode_button_label = self.cv.create_text(self.S(762), self.S(374), text="GET", fill=self.TEXT_WHITE, font=("Arial", self.F(14), "bold"), anchor="center", tags=("getcode_content",))
+        hit_getcode_btn = self.cv.create_rectangle(self.S(696), self.S(344), self.S(828), self.S(404), fill="", outline="", tags=("getcode_content",))
+        for itm in (self.getcode_button_rect, self.getcode_button_label, hit_getcode_btn):
+            self.cv.tag_bind(itm, "<Button-1>", lambda e: self._getcode_submit())
+            self.cv.tag_bind(itm, "<Enter>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_HOVER) if not getattr(self, "_getcode_running", False) else None)
+            self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE) if not getattr(self, "_getcode_running", False) else None)
+            
+        # 3.1 Badge kết quả phụ (Mã OTP hoặc Trạng thái Link) -> Đưa ẩn lên sát bên trong để dùng nếu cần
+        self.otp_badge_txt = self.cv.create_text(self.S(800), self.S(374), text="______", fill=self.BG_INPUT, font=("Arial", self.F(1), "bold"), anchor="center", state="hidden")
 
         # 4. FOOTER: STATUS BAR & SPAM TIMER
         self.status_bar_rect = draw_rounded_rect(self.cv, self.S(36), self.S(438), self.S(740), self.S(510), radius=self.S(12), fill="#153524", outline="#245C3D", width=1.5)
@@ -811,7 +949,8 @@ class ModernNetflixApp:
         if self.show_getcode:
             self.cv.itemconfig(self.toggle_icon, text="▼")
             self.cv.itemconfigure("getcode_content", state="normal")
-            self.cv.itemconfigure(self.getcode_entry_win, state="normal")
+            if hasattr(self, 'getcode_entry_win'):
+                self.cv.itemconfigure(self.getcode_entry_win, state="normal")
             self.cv.coords(self.getcode_card, *get_rounded_rect_coords(self.S(36), self.S(278), self.S(844), self.S(420), self.S(14)))
             self.cv.coords(self.outer_panel, *get_rounded_rect_coords(self.S(14), self.S(14), self.S(866), self.S(535), self.S(24)))
             self.cv.coords(self.status_bar_rect, *get_rounded_rect_coords(self.S(36), self.S(438), self.S(740), self.S(510), self.S(12)))
@@ -826,7 +965,8 @@ class ModernNetflixApp:
         else:
             self.cv.itemconfig(self.toggle_icon, text="▶")
             self.cv.itemconfigure("getcode_content", state="hidden")
-            self.cv.itemconfigure(self.getcode_entry_win, state="hidden")
+            if hasattr(self, 'getcode_entry_win'):
+                self.cv.itemconfigure(self.getcode_entry_win, state="hidden")
             self.cv.coords(self.getcode_card, *get_rounded_rect_coords(self.S(36), self.S(278), self.S(844), self.S(328), self.S(14)))
             self.cv.coords(self.outer_panel, *get_rounded_rect_coords(self.S(14), self.S(14), self.S(866), self.S(443), self.S(24)))
             self.cv.coords(self.status_bar_rect, *get_rounded_rect_coords(self.S(36), self.S(438) - offset, self.S(740), self.S(510) - offset, self.S(12)))
@@ -846,14 +986,19 @@ class ModernNetflixApp:
     # GÓP Ý
     # ==========================================
     def open_feedback_dialog(self):
+        # Chặn mở trùng nhiều cửa sổ Feedback
+        if getattr(self, "_feedback_win", None) is not None and self._feedback_win.winfo_exists():
+            self._feedback_win.lift()
+            self._feedback_win.focus_force()
+            return
+
         top = tk.Toplevel(self.root)
+        self._feedback_win = top
         top.title("Góp ý / Báo lỗi")
         width, height = 420, 360
-        top.geometry(f"{width}x{height}")
         top.configure(bg=self.BG_WINDOW)
         top.resizable(False, False)
-        top.transient(self.root)
-        top.grab_set()
+        top.withdraw()
 
         cv = tk.Canvas(top, width=width, height=height, bg=self.BG_WINDOW, highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
@@ -904,19 +1049,26 @@ class ModernNetflixApp:
             cv.tag_bind(itm, "<Leave>", lambda e: cv.itemconfig(btn_rect, fill="#FFFFFF"))
 
         top.update_idletasks()
-        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
-        top.geometry(f"+{(sw - width) // 2}+{(sh - height) // 2}")
-        entry_name.focus_set()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        pos_x = root_x + (root_w - width) // 2
+        pos_y = root_y + (root_h - height) // 2
+        
+        top.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
+        top.deiconify()
+        top.lift()
+        top.grab_set()
+        top.after(80, lambda: (top.focus_force(), entry_name.focus_set()))
 
     def show_success_modal(self, sender):
         modal = tk.Toplevel(self.root)
         modal.title("Thành công")
         w, h = 340, 210
-        modal.geometry(f"{w}x{h}")
         modal.configure(bg=self.BG_WINDOW)
         modal.resizable(False, False)
-        modal.transient(self.root)
-        modal.grab_set()
+        modal.withdraw()
 
         cv = tk.Canvas(modal, width=w, height=h, bg=self.BG_WINDOW, highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
@@ -940,8 +1092,16 @@ class ModernNetflixApp:
             cv.tag_bind(itm, "<Leave>", lambda e: cv.itemconfig(btn_rect, fill="#FFFFFF"))
 
         modal.update_idletasks()
-        sw, sh = modal.winfo_screenwidth(), modal.winfo_screenheight()
-        modal.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        pos_x = root_x + (root_w - w) // 2
+        pos_y = root_y + (root_h - h) // 2
+        modal.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+        modal.deiconify()
+        modal.lift()
+        modal.grab_set()
 
     def _send_feedback_telegram(self, sender, content, window, cv, err_text, btn_txt, entry_name, txt_content):
         def _send():
@@ -994,71 +1154,123 @@ class ModernNetflixApp:
             self.cv.itemconfig(self.timer_box_rect, outline="#38BDF8")
 
     def _open_template_settings(self):
+        if getattr(self, "_template_win", None) is not None and self._template_win.winfo_exists():
+            self._template_win.lift()
+            self._template_win.focus_force()
+            return
+
         templates = load_custom_templates()
-        popup_schemas = [
-            {"id": "capcut", "left_title": "1. Capcut format", "right_tag": "EMAIL + PASS", "default": templates.get("capcut", DEFAULT_TEMPLATES["capcut"])},
-            {"id": "netflix", "left_title": "2. Netflix format", "right_tag": "EMAIL + USERNAME", "default": templates.get("netflix", DEFAULT_TEMPLATES["netflix"])},
-            {"id": "chatgpt", "left_title": "3. ChatGPT format", "right_tag": "EMAIL + PASS + CODE", "default": templates.get("chatgpt", DEFAULT_TEMPLATES["chatgpt"])}
+        tab_schemas = [
+            {"id": "capcut", "tab_title": "Capcut", "right_tag": "EMAIL + PASS", "default": templates.get("capcut", DEFAULT_TEMPLATES["capcut"])},
+            {"id": "netflix", "tab_title": "Netflix", "right_tag": "EMAIL + USERNAME", "default": templates.get("netflix", DEFAULT_TEMPLATES["netflix"])},
+            {"id": "chatgpt", "tab_title": "ChatGPT", "right_tag": "EMAIL + PASS + CODE", "default": templates.get("chatgpt", DEFAULT_TEMPLATES["chatgpt"])}
         ]
 
         top = tk.Toplevel(self.root)
+        self._template_win = top
         top.title("Format DATA")
+        win_w, win_h = 460, 420
+        top.geometry(f"{win_w}x{win_h}")
         top.resizable(False, False)
         top.configure(bg=self.BG_WINDOW)
         top.withdraw()
-        top.grab_set()
 
-        pcv = tk.Canvas(top, width=460, bg=self.BG_WINDOW, highlightthickness=0, bd=0)
+        pcv = tk.Canvas(top, width=win_w, height=win_h, bg=self.BG_WINDOW, highlightthickness=0, bd=0)
         pcv.pack(fill="both", expand=True)
 
-        current_y = 24
+        current_tab = ["capcut"]
+        tab_rects, tab_texts = {}, {}
         text_widgets = {}
-        for item in popup_schemas:
-            fid = item["id"]
-            content = item["default"]
-            line_count = max(content.count("\n") + 1, 3)
-            inner_box_h = line_count * 17 + 16
-            card_h = 38 + inner_box_h + 16
-            card_bottom = current_y + card_h
-            draw_rounded_rect(pcv, 24, current_y, 436, card_bottom, radius=14, fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-            pcv.create_text(40, current_y + 22, text=item["left_title"], fill=self.TEXT_WHITE, font=("Arial", 14, "bold"), anchor="w")
-            pcv.create_text(420, current_y + 22, text=item["right_tag"], fill="#6E788C", font=("Arial", 11, "bold"), anchor="e")
-            box_top = current_y + 38
-            box_bottom = box_top + inner_box_h
-            inner_box_rect = draw_rounded_rect(pcv, 40, box_top, 420, box_bottom, radius=10, fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5)
-            txt = tk.Text(pcv, bg=self.BG_INPUT, fg=self.TEXT_WHITE, insertbackground=self.TEXT_WHITE, font=("Arial", 12), bd=0, highlightthickness=0, wrap="word")
-            txt.insert("1.0", content)
-            pcv.create_window(50, box_top + 8, window=txt, width=360, height=inner_box_h - 16, anchor="nw")
-            txt.bind("<FocusIn>", lambda e, r=inner_box_rect: pcv.itemconfig(r, outline=self.BORDER_ACTIVE))
-            txt.bind("<FocusOut>", lambda e, r=inner_box_rect: pcv.itemconfig(r, outline=self.BORDER_INPUT))
-            text_widgets[fid] = txt
-            current_y = card_bottom + 16
+        tag_labels = {}
 
+        # 1. HÀNG 3 NÚT TAB
+        btn_w, btn_h, gap = 120, 32, 10
+        start_x = 35
+        for idx, item in enumerate(tab_schemas):
+            fid = item["id"]
+            bx1 = start_x + idx * (btn_w + gap)
+            bx2 = bx1 + btn_w
+            rect = draw_rounded_rect(pcv, bx1, 20, bx2, 20 + btn_h, radius=8, fill=self.BTN_BG_INACTIVE, outline="")
+            txt = pcv.create_text((bx1 + bx2) // 2, 20 + btn_h // 2, text=item["tab_title"], fill=self.TEXT_MUTED, font=("Arial", 12, "bold"))
+            hit = pcv.create_rectangle(bx1, 20, bx2, 20 + btn_h, fill="", outline="")
+            tab_rects[fid] = rect
+            tab_texts[fid] = txt
+
+            def _make_click(tab_id=fid):
+                return lambda e: switch_tab(tab_id)
+
+            for itm in (rect, txt, hit):
+                pcv.tag_bind(itm, "<Button-1>", _make_click(fid))
+
+        # 2. KHUNG NỘI DUNG CHÍNH Ở GIỮA
+        card_top, card_bottom = 66, 340
+        draw_rounded_rect(pcv, 24, card_top, 436, card_bottom, radius=12, fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
+        
+        info_tag_txt = pcv.create_text(418, card_top + 18, text="", fill="#6E788C", font=("Arial", 10, "bold"), anchor="e")
+        input_box_rect = draw_rounded_rect(pcv, 38, card_top + 34, 422, card_bottom - 16, radius=10, fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5)
+
+        for item in tab_schemas:
+            fid = item["id"]
+            txt = tk.Text(pcv, bg=self.BG_INPUT, fg=self.TEXT_WHITE, insertbackground=self.TEXT_WHITE, font=("Arial", 12), bd=0, highlightthickness=0, wrap="word")
+            txt.insert("1.0", item["default"])
+            txt.bind("<FocusIn>", lambda e, r=input_box_rect: pcv.itemconfig(r, outline=self.BORDER_ACTIVE))
+            txt.bind("<FocusOut>", lambda e, r=input_box_rect: pcv.itemconfig(r, outline=self.BORDER_INPUT))
+            text_widgets[fid] = txt
+            tag_labels[fid] = item["right_tag"]
+
+        current_win_item = [None]
+
+        def switch_tab(target_id):
+            current_tab[0] = target_id
+            for fid in tab_rects:
+                if fid == target_id:
+                    pcv.itemconfig(tab_rects[fid], fill=self.BTN_BG_ACTIVE)
+                    pcv.itemconfig(tab_texts[fid], fill="#FFFFFF")
+                else:
+                    pcv.itemconfig(tab_rects[fid], fill=self.BTN_BG_INACTIVE)
+                    pcv.itemconfig(tab_texts[fid], fill=self.TEXT_MUTED)
+
+            pcv.itemconfig(info_tag_txt, text=tag_labels[target_id])
+
+            if current_win_item[0] is not None:
+                pcv.delete(current_win_item[0])
+            
+            active_text_widget = text_widgets[target_id]
+            current_win_item[0] = pcv.create_window(46, card_top + 42, window=active_text_widget, width=366, height=card_bottom - card_top - 66, anchor="nw")
+            active_text_widget.focus_set()
+
+        # 3. NÚT APPLY DƯỚI ĐÁY
         def _on_apply():
             new_data = {fid: text_widgets[fid].get("1.0", "end").strip() for fid in text_widgets}
             save_custom_templates(new_data)
             self.set_banner_status("Đã lưu định dạng", "Cấu hình Format DATA mới đã có hiệu lực", mode="success")
             top.destroy()
 
-        btn_y = current_y + 6
-        btn_w = 170
-        btn_h = 44
-        btn_x1 = (460 - btn_w) // 2
+        btn_y, btn_w, btn_h = 356, 160, 42
+        btn_x1 = (win_w - btn_w) // 2
         btn_x2 = btn_x1 + btn_w
         btn_rect = draw_rounded_rect(pcv, btn_x1, btn_y, btn_x2, btn_y + btn_h, radius=10, fill="#FFFFFF", outline="")
-        btn_txt = pcv.create_text(230, btn_y + btn_h // 2, text="Apply", fill="#111827", font=("Arial", 14, "bold"))
+        btn_txt = pcv.create_text(win_w // 2, btn_y + btn_h // 2, text="Apply", fill="#111827", font=("Arial", 14, "bold"))
         btn_hit = pcv.create_rectangle(btn_x1, btn_y, btn_x2, btn_y + btn_h, fill="", outline="")
         for itm in (btn_rect, btn_txt, btn_hit):
             pcv.tag_bind(itm, "<Button-1>", lambda e: _on_apply())
             pcv.tag_bind(itm, "<Enter>", lambda e: pcv.itemconfig(btn_rect, fill="#E5E7EB"))
             pcv.tag_bind(itm, "<Leave>", lambda e: pcv.itemconfig(btn_rect, fill="#FFFFFF"))
 
-        total_height = btn_y + btn_h + 24
-        pcv.config(height=total_height)
+        switch_tab("capcut")
+
         top.update_idletasks()
-        top.geometry(f"460x{total_height}+{(top.winfo_screenwidth() - 460) // 2}+{(top.winfo_screenheight() - total_height) // 2}")
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        pos_x = root_x + (root_w - win_w) // 2
+        pos_y = root_y + (root_h - win_h) // 2
+        
+        top.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
         top.deiconify()
         top.lift()
+        top.grab_set()
 
     def _on_telegram_status_click(self, event=None):
         if not self.tg_authorized: TelegramLoginModal(self)
@@ -1076,11 +1288,12 @@ class ModernNetflixApp:
         if not self.getcode_email.get().strip():
             self.getcode_placeholder_active = True
             self.getcode_entry.delete(0, "end")
-            self.getcode_entry.insert(0, "Nhập email ạ...")
+            placeholder_text = "Nhập email ạ..." if self.sub_mode == "CODE" else "Nhập link/JSON ạ..."
+            self.getcode_entry.insert(0, placeholder_text)
             self.getcode_entry.configure(fg=self.TEXT_MUTED)
 
     def _getcode_keypress(self, event):
-        if event.keysym == "Return":
+        if event.keysym in ("Return", "KP_Enter"):
             self._getcode_submit()
             return "break"
         if event.keysym.lower() == "v" and (event.state & 0xC):
@@ -1092,14 +1305,19 @@ class ModernNetflixApp:
     def _getcode_paste(self, event=None):
         try: raw_pasted = self.root.clipboard_get()
         except tk.TclError: raw_pasted = ""
-        email_match = RE_EMAIL.search(raw_pasted)
-        if email_match: clean_email = email_match.group(1).strip()
-        else: clean_email = RE_WHITESPACE.sub("", RE_GETCODE_PREFIX.sub("", raw_pasted.strip()))
+        
+        if self.sub_mode == "CODE":
+            email_match = RE_EMAIL.search(raw_pasted)
+            if email_match: clean_val = email_match.group(1).strip()
+            else: clean_val = RE_WHITESPACE.sub("", RE_GETCODE_PREFIX.sub("", raw_pasted.strip()))
+        else:
+            clean_val = raw_pasted.strip()
+            
         self.getcode_entry.delete(0, "end")
-        self.getcode_entry.insert(0, clean_email)
+        self.getcode_entry.insert(0, clean_val)
         self.getcode_entry.configure(fg=self.TEXT_WHITE)
         self.getcode_placeholder_active = False
-        if clean_email: self.root.after(80, self._getcode_submit)
+        if clean_val: self.root.after(80, self._getcode_submit)
         return "break"
 
     def _getcode_submit(self, event=None):
@@ -1108,25 +1326,56 @@ class ModernNetflixApp:
             self.set_banner_status("Chưa kết nối Telegram", "Hãy đăng nhập Telegram ở cửa sổ vừa bật", mode="error")
             TelegramLoginModal(self)
             return "break"
-        raw_val = self.getcode_email.get()
-        if self.getcode_placeholder_active or raw_val == "Nhập email ạ...":
-            self.set_banner_status("Email không hợp lệ", "Vui lòng kiểm tra lại chuỗi vừa dán", mode="error")
+            
+        raw_val = self.getcode_email.get().strip()
+        if self.getcode_placeholder_active or raw_val in ("Nhập email ạ...", "Nhập link/JSON ạ..."):
+            self._start_getcode_error_countdown("Dữ liệu trống", "Vui lòng dán dữ liệu vào ô nhập", 5)
             return "break"
-        email_match = RE_EMAIL.search(raw_val)
-        email = email_match.group(1).strip() if email_match else ""
-        self.getcode_entry.delete(0, "end")
-        self.getcode_entry.insert(0, email)
-        if not email:
-            self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
-            self.set_banner_status("Email không hợp lệ", "Vui lòng kiểm tra lại chuỗi vừa dán", mode="error")
+
+        # PHÂN NHÁNH 1: CHẾ ĐỘ GET CODE
+        if self.sub_mode == "CODE":
+            email_match = RE_EMAIL.search(raw_val)
+            email = email_match.group(1).strip() if email_match else ""
+            self.getcode_entry.delete(0, "end")
+            self.getcode_entry.insert(0, email)
+            if not email:
+                self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
+                self._start_getcode_error_countdown("Email không hợp lệ", "Vui lòng kiểm tra lại email", 5)
+                return "break"
+                
+            self._getcode_running = True
+            self.cv.itemconfig(self.getcode_button_label, text="...", fill="#FFFFFF")
+            self.cv.itemconfig(self.getcode_button_rect, fill="#D97706")
+            self.set_banner_status("Đang gửi lệnh Telegram", f"/getcode {email}", mode="loading")
+            threading.Thread(target=self._fetch_code_from_bot_thread, args=(email,), daemon=True).start()
             return "break"
-        self._getcode_running = True
-        self.cv.itemconfig(self.otp_badge_txt, text="...", fill=self.BADGE_TEXT)
-        self.cv.itemconfig(self.getcode_button_label, text="Đang lấy...", fill="#FFFFFF")
-        self.cv.itemconfig(self.getcode_button_rect, fill="#D97706")
-        self.set_banner_status("Đang gửi lệnh Telegram", f"/getcode {email}", mode="loading")
-        threading.Thread(target=self._fetch_code_from_bot_thread, args=(email,), daemon=True).start()
-        return "break"
+
+        # PHÂN NHÁNH 2: CHẾ ĐỘ GET LINK
+        else:
+            # Kiểm tra xem có phải định dạng Link hoặc JSON hợp lệ không
+            is_link = raw_val.startswith("http://") or raw_val.startswith("https://")
+            is_json = raw_val.startswith("{") or raw_val.startswith("[")
+            
+            # Nếu người dùng dán nhầm Email/Text vào ô Get LINK -> Báo lỗi & tự xoá 5s
+            if not is_link and not is_json:
+                self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
+                if "@" in raw_val:
+                    self._start_getcode_error_countdown("Sai chế độ!", "Đang dán Email. Hãy đổi sang nút 'CODE'", 5)
+                else:
+                    self._start_getcode_error_countdown("Dữ liệu không hợp lệ", "Chỉ nhận link URL hoặc JSON!", 5)
+                return "break"
+
+            if "netflixid=" in raw_val.lower() and not is_json:
+                self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
+                self._start_getcode_error_countdown("Cảnh báo Metadata", "Vui lòng copy link JSON", 5)
+                return "break"
+
+            self._getcode_running = True
+            self.cv.itemconfig(self.getcode_button_label, text="...", fill="#FFFFFF")
+            self.cv.itemconfig(self.getcode_button_rect, fill="#D97706")
+            self.set_banner_status("Đang kết nối bot GetLoginLink", "Gửi lệnh tạo link đăng nhập...", mode="loading")
+            threading.Thread(target=self._fetch_link_from_bot_thread, args=(raw_val,), daemon=True).start()
+            return "break"
 
     def _fetch_code_from_bot_thread(self, email: str):
         try:
@@ -1180,23 +1429,105 @@ class ModernNetflixApp:
         except Exception as e:
             self.root.after(0, lambda: self._finish_getcode(None, f"Lỗi: {e}"))
 
+    def _fetch_link_from_bot_thread(self, payload_text: str):
+        """Xử lý luồng lấy login link từ bot @loginlinkjm_bot"""
+        try:
+            api_id = int(os.environ.get("TG_API_ID", 0))
+            api_hash = os.environ.get("TG_API_HASH", "")
+            session = get_session_path()
+            bot_target = TG_GETLINK_BOT_USERNAME
+
+            async def _communicate():
+                client = TelegramClient(session, api_id, api_hash, timeout=12)
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=8.0)
+                    if not await client.is_user_authorized():
+                        self.tg_authorized = False
+                        self.tg_status_text = "Telegram: Click để đăng nhập"
+                        self.tg_status_color = "#F59E0B"
+                        self.root.after(0, lambda: self.cv.itemconfig(self.telegram_status, text=self.tg_status_text, fill=self.tg_status_color))
+                        return None, "Phiên Telegram hết hạn, hãy bấm đăng nhập lại"
+                    
+                    self.root.after(0, lambda: self.set_banner_status("Đang tìm GetLoginLink Bot", f"{bot_target}", mode="loading"))
+                    entity = await asyncio.wait_for(client.get_entity(bot_target), timeout=8.0)
+
+                    self.root.after(0, lambda: self.set_banner_status("Đang gửi lệnh", "🔗 Get Login Link", mode="loading"))
+                    sent_cmd = await asyncio.wait_for(client.send_message(entity, "🔗 Get Login Link"), timeout=8.0)
+                    last_id = sent_cmd.id
+                    
+                    start_ready = time.time()
+                    while time.time() - start_ready < 6:
+                        await asyncio.sleep(0.3)
+                        msgs = await client.get_messages(entity, limit=2)
+                        for m in msgs:
+                            if m.id > last_id and not m.out:
+                                last_id = m.id
+                                break
+                        if last_id != sent_cmd.id:
+                            break
+
+                    self.root.after(0, lambda: self.set_banner_status("Đang gửi dữ liệu", "Chờ bot tạo Login Link mới...", mode="loading"))
+                    sent_payload = await asyncio.wait_for(client.send_message(entity, payload_text), timeout=8.0)
+                    last_id = sent_payload.id
+
+                    start_wait = time.time()
+                    last_shown_sec = -1
+                    while time.time() - start_wait < 25:
+                        remain = int(25 - (time.time() - start_wait))
+                        if remain != last_shown_sec:
+                            last_shown_sec = remain
+                            self.root.after(0, lambda r=remain: self.set_banner_status("Đang đợi bot tạo link...", f"Còn lại {r}s", mode="loading"))
+                        await asyncio.sleep(0.4)
+                        messages = await client.get_messages(entity, limit=3)
+                        for msg in messages:
+                            if msg.id > last_id and not msg.out and msg.message:
+                                reply_text = msg.message.strip()
+                                match = RE_NETFLIX_LINK.search(reply_text)
+                                if match:
+                                    return match.group(1), reply_text
+                                match_http = RE_HTTP_LINK.search(reply_text)
+                                if match_http and "t.me" not in match_http.group(1):
+                                    return match_http.group(1), reply_text
+                                if any(w in reply_text.lower() for w in ("invalid", "error", "lỗi", "không hợp lệ", "expire")):
+                                    return None, f"Bot báo: {reply_text[:45]}"
+                    return None, "Bot GetLoginLink không phản hồi sau 25s"
+                except asyncio.TimeoutError:
+                    return None, f"Hết thời gian chờ kết nối tới {bot_target}"
+                finally:
+                    await client.disconnect()
+
+            link_result, full_reply = asyncio.run(_communicate())
+            self.root.after(0, lambda: self._finish_getlink(link_result, full_reply))
+        except Exception as e:
+            self.root.after(0, lambda: self._finish_getlink(None, f"Lỗi: {e}"))
+
     def _finish_getcode(self, code_result, detail_text):
         self._getcode_running = False
+        self.cv.itemconfig(self.getcode_button_label, text="GET", fill=self.TEXT_WHITE)
+        self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE)
         if code_result:
-            spaced_code = " ".join(list(str(code_result))) if len(str(code_result)) <= 4 else str(code_result)[:8]
-            self.cv.itemconfig(self.otp_badge_txt, text=spaced_code, fill=self.BADGE_TEXT)
-            self.cv.itemconfig(self.getcode_button_label, text="Get code", fill=self.TEXT_WHITE)
-            self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE)
             self.root.clipboard_clear()
             self.root.clipboard_append(str(code_result))
             self.root.update_idletasks()
             self.play_sound()
-            self.set_banner_status(f"Đã lấy mã: {code_result}", "Đã tự động Copy vào Clipboard!", mode="success")
+            self._start_getcode_clear_countdown(f"Mã OTP: {code_result}", "Đã Copy mã vào Clipboard!", 5)
         else:
-            self.cv.itemconfig(self.otp_badge_txt, text="______", fill=self.BADGE_TEXT)
-            self.cv.itemconfig(self.getcode_button_label, text="Get code", fill=self.BTN_TXT_INACTIVE)
-            self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE)
-            self.set_banner_status("Lấy code thất bại", detail_text, mode="error")
+            self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
+            self._start_getcode_error_countdown("Lấy code thất bại", detail_text[:40], 5)
+
+    def _finish_getlink(self, link_result, detail_text):
+        self._getcode_running = False
+        self.cv.itemconfig(self.getcode_button_label, text="GET", fill=self.TEXT_WHITE)
+        self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE)
+        if link_result:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(link_result))
+            self.root.update_idletasks()
+            self.play_sound()
+            self._start_getcode_clear_countdown("Đã lấy Login Link!", f"{str(link_result)[:45]}... (Đã copy)", 5)
+        else:
+            self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
+            self._start_getcode_error_countdown("Lấy link thất bại", detail_text[:40], 5)
 
     def check_telegram_connection(self):
         self.tg_status_text = "Telegram: Đang kiểm tra..."
@@ -1380,7 +1711,7 @@ class ModernNetflixApp:
             self.root.after_cancel(self._tv_timer)
             self._tv_timer = None
         raw = self.tv_input_text.get("1.0", "end").strip()
-        if not raw or raw == "Nhập link ạ....": return
+        if not raw or raw in ("Nhập link ạ...", "Nhập link ạ....", "Nhập link..."): return
         source_type, cookies_list = parse_input_source(raw)
         if not source_type or not cookies_list:
             self._set_code_input_state(False)
@@ -1428,7 +1759,7 @@ class ModernNetflixApp:
             self.tv_input_text.delete("1.0", "end")
             self.tv_placeholder_active = True
             self.tv_input_text.config(fg=self.TEXT_MUTED)
-            self.tv_input_text.insert("1.0", "Nhập link...")
+            self.tv_input_text.insert("1.0", "Nhập link ạ...")
             self._set_code_input_state(False)
             self.root.focus_set()
             self.set_banner_status("Sẵn sàng", "Hãy dán JSON hoặc Metadata tiếp theo", mode="success")
@@ -1448,7 +1779,7 @@ class ModernNetflixApp:
     def _process_cskh_text(self):
         try:
             raw = self.cskh_input_text.get("1.0", "end").strip()
-            if not raw or raw in ("Nhập thông tin...", "Nhập thông tin đi ạ..."): return
+            if not raw or raw in ("Nhập thông tin...", "Nhập thông tin đi ạ...", "Nhập thông tin ạ..."): return
             formatted = format_bot_account_text(raw)
             if formatted:
                 self.cskh_input_text.delete("1.0", "end")
@@ -1492,7 +1823,7 @@ class ModernNetflixApp:
             self.cskh_input_text.delete("1.0", "end")
             self.cskh_placeholder_active = True
             self.cskh_input_text.config(fg=self.TEXT_MUTED)
-            self.cskh_input_text.insert("1.0", "Nhập thông tin...")
+            self.cskh_input_text.insert("1.0", "Nhập thông tin ạ...")
             self.root.focus_set()
             self.set_banner_status("Sẵn sàng", "Hãy dán thông tin CSKH, link TV8 hoặc email", mode="success")
 
@@ -1672,7 +2003,7 @@ class ModernNetflixApp:
                 dom_status = await page.evaluate('''() => {
                     if (document.querySelector('[data-uia*="success"], .success-icon, .checkmark')) return 'DONE';
                     const bodyText = (document.body.innerText || '').toLowerCase();
-                    const successWords = ['all set', 'connected', 'success', 'enjoy netflix on your tv', 'thành công', 'đã kết nối', 'hoàn tất', 'listo', 'conectado'];
+                    const successWords = ['all set', 'connected', 'success', 'enjoy netflix on your tv', 'thành công', 'đã kết nối', 'hoàn tất', 'listo', 'conectado', 'autenticación'];
                     for (const w of successWords) { if (bodyText.includes(w)) return 'DONE'; }
                     const errorSelectors = ['[data-uia*="error"]', '[data-uia*="message"]', '.ui-message-error', '.error-message', '.error', 'div[role="alert"]'];
                     for (const sel of errorSelectors) {
