@@ -148,8 +148,8 @@ def apply_full_update(root_widget=None):
                 subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR)
             else:
                 # Nếu chạy bằng python script thông thường trên macOS / Windows
-                script_path = os.path.abspath(sys.argv[0])
-                args = [executable, script_path] + sys.argv[1:]
+                target_script = os.path.join(APP_DIR, "sharetool.py")
+                args = [executable, target_script]
                 subprocess.Popen(args, cwd=APP_DIR)
             
             # Thoát ngay tiến trình cũ để tránh bị deadlock giữa các thread
