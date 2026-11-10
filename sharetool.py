@@ -132,6 +132,11 @@ def apply_full_update(root_widget=None):
 
         def _restart_app():
             try:
+                # Dọn dẹp tài nguyên và tắt ngầm các kết nối trước khi khởi động lại
+                try:
+                    TG_MANAGER.shutdown()
+                except Exception:
+                    pass
                 if root_widget:
                     root_widget.destroy()
             except Exception:
@@ -139,11 +144,16 @@ def apply_full_update(root_widget=None):
             
             executable = sys.executable
             if getattr(sys, 'frozen', False):
-                # Nếu là bản đóng gói (.app / .exe), mở tiến trình mới và thoát tiến trình cũ
+                # Nếu là bản đóng gói (.app / .exe)
                 subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR)
-                os._exit(0)
             else:
-                os.execv(executable, [executable] + sys.argv)
+                # Nếu chạy bằng python script thông thường trên macOS / Windows
+                script_path = os.path.abspath(sys.argv[0])
+                args = [executable, script_path] + sys.argv[1:]
+                subprocess.Popen(args, cwd=APP_DIR)
+            
+            # Thoát ngay tiến trình cũ để tránh bị deadlock giữa các thread
+            os._exit(0)
 
         if root_widget:
             root_widget.after(100, _restart_app)
