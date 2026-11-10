@@ -771,7 +771,7 @@ class ModernNetflixApp:
 
         # 2. KHỐI TRÊN PHẢI: Log CODE & Các Icon
         draw_rounded_rect(self.cv, self.S(322), self.S(36), self.S(844), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cv.create_text(self.S(338), self.S(66), text="Log CODE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cv.create_text(self.S(338), self.S(66), text="Log COADE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # === BỘ MENU TẮT MỞ KHI CLICK [+] / [-] ===
         btn_tg_x, btn_tg_w = 786, 42
