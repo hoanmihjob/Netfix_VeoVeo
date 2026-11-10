@@ -579,6 +579,148 @@ class TelegramLoginModal:
         self.app.set_banner_status("Đăng nhập thành công!", "Tài khoản Telegram đã sẵn sàng", mode="success")
         self.top.destroy()
 
+class UpdatePromptModal:
+    def __init__(self, parent_app, has_update: bool):
+        self.app = parent_app
+        self.has_update = has_update
+        self.top = tk.Toplevel(self.app.root)
+        self.top.title("Cập nhật phần mềm")
+        
+        # Thiết lập kích thước chuẩn xác không bị tràn
+        self.width = 440
+        self.height = 370 if has_update else 230
+        self.top.geometry(f"{self.width}x{self.height}")
+        self.top.configure(bg=self.app.BG_WINDOW)
+        self.top.resizable(False, False)
+        self.top.transient(self.app.root)
+        self.top.grab_set()
+
+        self.cv = tk.Canvas(
+            self.top, width=self.width, height=self.height, 
+            bg=self.app.BG_WINDOW, highlightthickness=0, bd=0
+        )
+        self.cv.pack(fill="both", expand=True)
+
+        # Viền card ngoài cùng
+        draw_rounded_rect(
+            self.cv, 16, 16, self.width - 16, self.height - 16, 
+            radius=14, fill=self.app.BG_CARD, outline=self.app.BORDER_CARD, width=1.5
+        )
+
+        if not self.has_update:
+            # ==========================================
+            # 1. TRƯỜNG HỢP: ĐÃ LÀ BẢN MỚI NHẤT (CHƯA CÓ UPDATE)
+            # ==========================================
+            # Badge trạng thái tròn
+            self.cv.create_oval(self.width//2 - 24, 34, self.width//2 + 24, 82, fill="#153524", outline="#245C3D", width=1.5)
+            self.cv.create_text(self.width//2, 58, text="✓", fill="#22C55E", font=("Arial", 22, "bold"))
+
+            self.cv.create_text(
+                self.width//2, 106,
+                text="Bạn đang dùng phiên bản mới nhất",
+                fill=self.app.TEXT_WHITE, font=("Arial", 15, "bold"), justify="center"
+            )
+            self.cv.create_text(
+                self.width//2, 134,
+                text="Hiện chưa có cập nhật mới. Khi có tính năng mới,\nHoàn sẽ gửi thông báo đến bạn ngay nhé!",
+                fill=self.app.TEXT_MUTED, font=("Arial", 11), justify="center"
+            )
+
+            # Nút OK căn giữa
+            btn_w, btn_h, btn_y = 120, 36, 166
+            bx1 = (self.width - btn_w) // 2
+            bx2 = bx1 + btn_w
+            btn_rect = draw_rounded_rect(self.cv, bx1, btn_y, bx2, btn_y + btn_h, radius=8, fill="#FFFFFF", outline="")
+            btn_txt = self.cv.create_text(self.width//2, btn_y + btn_h//2, text="Đã hiểu", fill="#111827", font=("Arial", 13, "bold"))
+            btn_hit = self.cv.create_rectangle(bx1, btn_y, bx2, btn_y + btn_h, fill="", outline="")
+
+            for itm in (btn_rect, btn_txt, btn_hit):
+                self.cv.tag_bind(itm, "<Button-1>", lambda e: self.top.destroy())
+                self.cv.tag_bind(itm, "<Enter>", lambda e: self.cv.itemconfig(btn_rect, fill="#E5E7EB"))
+                self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(btn_rect, fill="#FFFFFF"))
+
+        else:
+            # ==========================================
+            # 2. TRƯỜNG HỢP: ĐÃ CÓ BẢN MỚI (CÓ CHẤM ĐỎ)
+            # ==========================================
+            # Tag phiên bản nhỏ chuyên nghiệp
+            tag_w, tag_h = 70, 22
+            tag_x1 = (self.width - tag_w) // 2
+            draw_rounded_rect(self.cv, tag_x1, 28, tag_x1 + tag_w, 28 + tag_h, radius=6, fill="#1E293B", outline="#3B82F6", width=1.0)
+            self.cv.create_text(self.width//2, 28 + tag_h//2, text="UPDATE", fill="#38BDF8", font=("Arial", 10, "bold"))
+
+            # Tiêu đề
+            self.cv.create_text(
+                self.width//2, 66,
+                text="Đã có phiên bản cập nhật mới!",
+                fill=self.app.TEXT_WHITE, font=("Arial", 18, "bold"), justify="center"
+            )
+
+            # Box Changelog bo góc
+            box_x1, box_y1, box_x2, box_y2 = 36, 88, self.width - 36, 245
+            draw_rounded_rect(self.cv, box_x1, box_y1, box_x2, box_y2, radius=10, fill=self.app.BG_INPUT, outline=self.app.BORDER_INPUT, width=1.5)
+
+            # Header bên trong box
+            self.cv.create_text(box_x1 + 16, box_y1 + 18, text="Nội dung cập nhật:", fill="#94A3B8", font=("Arial", 12, "bold"), anchor="w")
+
+            # Các dòng tính năng (Dùng ký hiệu dot thẩm mỹ)
+            changelog_items = [
+                "• Nâng cấp độ mượt khi Get CODE & Login Link",
+                "• Tối ưu hệ thống bộ nhớ & chống văng ứng dụng",
+                "• Tự động đồng bộ và sửa các lỗi hiển thị UI"
+            ]
+            line_y = box_y1 + 42
+            for item in changelog_items:
+                self.cv.create_text(box_x1 + 16, line_y, text=item, fill="#E2E8F0", font=("Arial", 12), anchor="w")
+                line_y += 24
+
+            # Câu hỏi xác nhận
+            self.cv.create_text(
+                self.width//2, 266,
+                text="Ứng dụng sẽ tự động tải dữ liệu mới và khởi động lại.",
+                fill=self.app.TEXT_MUTED, font=("Arial", 12), justify="center"
+            )
+
+            # Nút bấm: Để sau (Secondary) & Cập nhật ngay (Primary Xanh)
+            btn_w, btn_h, btn_y = 150, 40, 295
+            
+            # 1. Nút "Để sau" (Bên trái)
+            bx1_left = 48
+            bx2_left = bx1_left + btn_w
+            btn_no_rect = draw_rounded_rect(self.cv, bx1_left, btn_y, bx2_left, btn_y + btn_h, radius=8, fill=self.app.BG_CARD, outline=self.app.BORDER_CARD, width=1.5)
+            btn_no_txt = self.cv.create_text((bx1_left + bx2_left)//2, btn_y + btn_h//2, text="Để sau", fill=self.app.TEXT_MUTED, font=("Arial", 12, "bold"))
+            hit_no = self.cv.create_rectangle(bx1_left, btn_y, bx2_left, btn_y + btn_h, fill="", outline="")
+            
+            for itm in (btn_no_rect, btn_no_txt, hit_no):
+                self.cv.tag_bind(itm, "<Button-1>", lambda e: self.top.destroy())
+                self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(btn_no_rect, outline=self.app.BORDER_ACTIVE), self.cv.itemconfig(btn_no_txt, fill=self.app.TEXT_WHITE)))
+                self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(btn_no_rect, outline=self.app.BORDER_CARD), self.cv.itemconfig(btn_no_txt, fill=self.app.TEXT_MUTED)))
+
+            # 2. Nút "Cập nhật ngay" (Bên phải - Accent Brand Blue)
+            bx1_right = self.width - 48 - btn_w
+            bx2_right = bx1_right + btn_w
+            btn_up_rect = draw_rounded_rect(self.cv, bx1_right, btn_y, bx2_right, btn_y + btn_h, radius=8, fill="#2563EB", outline="")
+            btn_up_txt = self.cv.create_text((bx1_right + bx2_right)//2, btn_y + btn_h//2, text="Update now", fill="#FFFFFF", font=("Arial", 14, "bold"))
+            hit_up = self.cv.create_rectangle(bx1_right, btn_y, bx2_right, btn_y + btn_h, fill="", outline="")
+            
+            for itm in (btn_up_rect, btn_up_txt, hit_up):
+                self.cv.tag_bind(itm, "<Button-1>", lambda e: self._on_confirm_update())
+                self.cv.tag_bind(itm, "<Enter>", lambda e: self.cv.itemconfig(btn_up_rect, fill="#1D4ED8"))
+                self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(btn_up_rect, fill="#2563EB"))
+
+        # Căn giữa màn hình ứng dụng chính
+        self.top.update_idletasks()
+        rx, ry = self.app.root.winfo_rootx(), self.app.root.winfo_rooty()
+        rw, rh = self.app.root.winfo_width(), self.app.root.winfo_height()
+        pos_x = rx + (rw - self.width) // 2
+        pos_y = ry + (rh - self.height) // 2
+        self.top.geometry(f"{self.width}x{self.height}+{pos_x}+{pos_y}")
+
+    def _on_confirm_update(self):
+        self.top.destroy()
+        self.app.set_banner_status("Đang cập nhật...", "Đang tải file và khởi động lại ứng dụng", mode="loading")[cite: 1]
+        self.app.root.update_idletasks()[cite: 1]
+        threading.Thread(target=apply_full_update, args=(self.app.root,), daemon=True).start()[cite: 1]
 
 # ==========================================
 # 5. CLASS CHÍNH CỦA ỨNG DỤNG
@@ -663,16 +805,7 @@ class ModernNetflixApp:
             self.root.after(0, _show_dot)
 
     def _on_click_update(self, event=None):
-        if self.has_update:
-            msg = "Đã có phiên bản mới trên GitHub!\nBạn có muốn cập nhật và khởi động lại ngay không?"
-        else:
-            msg = "Chưa phát hiện bản mới (hoặc đã là bản mới nhất).\nBạn có muốn tải lại phiên bản từ GitHub không?"
-
-        confirm = messagebox.askyesno("Xác nhận cập nhật", msg, parent=self.root)
-        if confirm:
-            self.set_banner_status("Đang cập nhật...", "Đang tải file và khởi động lại ứng dụng", mode="loading")
-            self.root.update_idletasks()
-            threading.Thread(target=apply_full_update, args=(self.root,), daemon=True).start()
+        UpdatePromptModal(self, self.has_update)
 
     def _on_app_close(self):
         try: self.cmd_queue.put({"action": "quit"})
@@ -771,7 +904,7 @@ class ModernNetflixApp:
 
         # 2. KHỐI TRÊN PHẢI: Log CODE & Các Icon
         draw_rounded_rect(self.cv, self.S(322), self.S(36), self.S(844), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cv.create_text(self.S(338), self.S(66), text="Log CODE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cv.create_text(self.S(338), self.S(66), text="Log COADE", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # === BỘ MENU TẮT MỞ KHI CLICK [+] / [-] ===
         btn_tg_x, btn_tg_w = 786, 42
