@@ -7,79 +7,27 @@ import threading
 import queue
 import os
 import sys
+import ssl
 import subprocess
 import urllib.request
 import urllib.parse
 import platform
 from tkinter import messagebox
 
-# Danh sách đầy đủ 4 file trên GitHub của bạn
-BASE_URL = "https://raw.githubusercontent.com/hoanmihjob/Netfix_VeoVeo/main/"
-FILES_TO_SYNC = [
-    "sharetool.py",
-    "templates.json",
-    "startup.mp3",
-    "alert.aiff"
-]
-
-def check_update_available():
-    """Kiểm tra xem có file nào khác biệt trên GitHub hay không (chỉ đọc, không ghi đè)"""
+# ==========================================
+# KHẮC PHỤC TRIỆT ĐỂ LỖI SSL TRÊN MACOS & WINDOWS
+# ==========================================
+def get_ssl_context():
+    """Tạo SSL context an toàn với certifi, tự động fallback nếu chạy trên máy thiếu chứng chỉ"""
     try:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        for file_name in FILES_TO_SYNC:
-            local_path = os.path.join(current_dir, file_name)
-            remote_url = BASE_URL + file_name
-            try:
-                req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    remote_data = resp.read()
-            except Exception:
-                continue
-
-            if not remote_data:
-                continue
-
-            local_data = b""
-            if os.path.exists(local_path):
-                with open(local_path, "rb") as f:
-                    local_data = f.read()
-
-            if not os.path.exists(local_path):
-                return True
-            elif file_name.endswith((".py", ".json")):
-                norm_remote = remote_data.replace(b"\r\n", b"\n").strip()
-                norm_local = local_data.replace(b"\r\n", b"\n").strip()
-                if norm_remote != norm_local:
-                    return True
-            else:
-                if remote_data != local_data:
-                    return True
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
     except Exception:
-        pass
-    return False
+        ctx = ssl._create_unverified_context()
+        return ctx
 
-def apply_full_update():
-    """Tải đè file mới và khởi động lại ứng dụng"""
-    try:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        for file_name in FILES_TO_SYNC:
-            local_path = os.path.join(current_dir, file_name)
-            remote_url = BASE_URL + file_name
-            req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                remote_data = resp.read()
-            if remote_data:
-                with open(local_path, "wb") as f:
-                    f.write(remote_data)
-        
-        # Khởi động lại tool
-        python_bin = sys.executable
-        if "python" in os.path.basename(python_bin).lower():
-            os.execv(python_bin, [python_bin] + sys.argv)
-        else:
-            os.execv(python_bin, sys.argv)
-    except Exception as e:
-        messagebox.showerror("Lỗi Update", f"Không thể cập nhật: {e}")
+SSL_CONTEXT = get_ssl_context()
+ssl._create_default_https_context = lambda: SSL_CONTEXT
 
 # Kích hoạt DPI Awareness cho Windows để chống mờ/méo giao diện
 if sys.platform == "win32":
@@ -92,6 +40,123 @@ if sys.platform == "win32":
         except Exception:
             pass
 
+# ==========================================
+# 0. QUẢN LÝ ĐƯỜNG DẪN ĐÓNG GÓI CHUẨN MAC & WIN
+# ==========================================
+def get_bundle_dir():
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_app_data_dir():
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        if sys.platform == "darwin" and ".app/Contents/MacOS" in exe_dir:
+            return os.path.abspath(os.path.join(exe_dir, "../../.."))
+        return exe_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+BUNDLE_DIR = get_bundle_dir()
+APP_DIR = get_app_data_dir()
+
+# ==========================================
+# CƠ CHẾ AUTO-UPDATE THÔNG MINH (HỖ TRỢ CẢ BẢN BUILD)
+# ==========================================
+BASE_URL = "https://raw.githubusercontent.com/hoanmihjob/Netfix_VeoVeo/main/"
+FILES_TO_SYNC = [
+    "sharetool.py",
+    "templates.json",
+    "startup.mp3",
+    "alert.aiff"
+]
+
+def get_local_sync_path(file_name):
+    """Luôn lưu và kiểm tra file cập nhật tại thư mục chứa ứng dụng (APP_DIR)"""
+    return os.path.join(APP_DIR, file_name)
+
+def check_update_available():
+    """Kiểm tra xem có file nào khác biệt trên GitHub hay không (chỉ đọc, không ghi đè)"""
+    try:
+        for file_name in FILES_TO_SYNC:
+            local_path = get_local_sync_path(file_name)
+            # Nếu đang chạy bản đóng gói mà chưa từng tải file lẻ về APP_DIR thì lấy file trong BUNDLE_DIR để đối chiếu
+            if not os.path.exists(local_path):
+                bundled_candidate = os.path.join(BUNDLE_DIR, file_name)
+                if os.path.exists(bundled_candidate):
+                    local_path = bundled_candidate
+
+            remote_url = f"{BASE_URL}{file_name}?t={int(time.time())}"
+            try:
+                req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
+                with urllib.request.urlopen(req, timeout=4, context=SSL_CONTEXT) as resp:
+                    remote_data = resp.read()
+            except Exception:
+                continue
+
+            if not remote_data:
+                continue
+
+            if not os.path.exists(local_path):
+                # Bỏ qua việc báo update nếu là sharetool.py nằm ẩn trong gói exe lần đầu chạy
+                if file_name == "sharetool.py" and getattr(sys, 'frozen', False):
+                    continue
+                return True
+
+            with open(local_path, "rb") as f:
+                local_data = f.read()
+
+            if file_name.endswith((".py", ".json")):
+                norm_remote = remote_data.replace(b"\r\n", b"\n").strip()
+                norm_local = local_data.replace(b"\r\n", b"\n").strip()
+                if norm_remote != norm_local:
+                    return True
+            else:
+                if remote_data != local_data:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def apply_full_update(root_widget=None):
+    """Tải đè file mới vào APP_DIR và khởi động lại ứng dụng mượt mà trên cả Mac & Win"""
+    try:
+        for file_name in FILES_TO_SYNC:
+            local_path = get_local_sync_path(file_name)
+            remote_url = f"{BASE_URL}{file_name}?t={int(time.time())}"
+            req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
+            with urllib.request.urlopen(req, timeout=8, context=SSL_CONTEXT) as resp:
+                remote_data = resp.read()
+            if remote_data:
+                with open(local_path, "wb") as f:
+                    f.write(remote_data)
+
+        def _restart_app():
+            try:
+                if root_widget:
+                    root_widget.destroy()
+            except Exception:
+                pass
+            
+            executable = sys.executable
+            if getattr(sys, 'frozen', False):
+                # Nếu là bản đóng gói (.app / .exe), mở tiến trình mới và thoát tiến trình cũ
+                subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR)
+                os._exit(0)
+            else:
+                os.execv(executable, [executable] + sys.argv)
+
+        if root_widget:
+            root_widget.after(100, _restart_app)
+        else:
+            _restart_app()
+
+    except Exception as e:
+        err_msg = f"Không thể cập nhật: {e}"
+        if root_widget:
+            root_widget.after(0, lambda: messagebox.showerror("Lỗi Update", err_msg, parent=root_widget))
+        else:
+            messagebox.showerror("Lỗi Update", err_msg)
+
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 
@@ -102,6 +167,17 @@ try:
 except ImportError:
     TelegramClient = None
     SessionPasswordNeededError = Exception
+
+# Nạp biến môi trường (.env)
+env_external = os.path.join(APP_DIR, ".env")
+env_bundled = os.path.join(BUNDLE_DIR, ".env")
+if os.path.exists(env_external):
+    load_dotenv(env_external)
+elif os.path.exists(env_bundled):
+    load_dotenv(env_bundled)
+
+def get_session_path():
+    return os.path.join(APP_DIR, "user_telegram")
 
 # ==========================================
 # CẤU HÌNH BOT TELEGRAM
@@ -124,36 +200,6 @@ RE_NON_DIGIT = re.compile(r'[^0-9]')
 RE_GETCODE_PREFIX = re.compile(r'^/getcode\s*', flags=re.I)
 RE_WHITESPACE = re.compile(r'\s+')
 RE_TG_CODE = re.compile(r'(?:Code\s*:\s*)?(\d{4,8})', flags=re.I)
-
-# ==========================================
-# 0. QUẢN LÝ ĐƯỜNG DẪN ĐÓNG GÓI
-# ==========================================
-def get_bundle_dir():
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(__file__))
-
-def get_app_data_dir():
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        if sys.platform == "darwin" and ".app/Contents/MacOS" in exe_dir:
-            return os.path.abspath(os.path.join(exe_dir, "../../.."))
-        return exe_dir
-    return os.path.dirname(os.path.abspath(__file__))
-
-BUNDLE_DIR = get_bundle_dir()
-APP_DIR = get_app_data_dir()
-
-env_external = os.path.join(APP_DIR, ".env")
-env_bundled = os.path.join(BUNDLE_DIR, ".env")
-if os.path.exists(env_external):
-    load_dotenv(env_external)
-elif os.path.exists(env_bundled):
-    load_dotenv(env_bundled)
-
-def get_session_path():
-    return os.path.join(APP_DIR, "user_telegram")
-
 
 # ==========================================
 # 1. CẤU HÌNH TEMPLATE
@@ -187,9 +233,16 @@ def load_custom_templates():
     global _TEMPLATES_CACHE
     if _TEMPLATES_CACHE is not None:
         return _TEMPLATES_CACHE
-    if os.path.exists(TEMPLATE_FILE):
+    
+    target_tpl = TEMPLATE_FILE
+    if not os.path.exists(target_tpl):
+        bundled_tpl = os.path.join(BUNDLE_DIR, "templates.json")
+        if os.path.exists(bundled_tpl):
+            target_tpl = bundled_tpl
+
+    if os.path.exists(target_tpl):
         try:
-            with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            with open(target_tpl, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 _TEMPLATES_CACHE = {**DEFAULT_TEMPLATES, **data}
                 return _TEMPLATES_CACHE
@@ -413,8 +466,13 @@ class TelegramLoginModal:
             self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(self.btn_rect, fill="#FFFFFF"))
 
         self.top.update_idletasks()
-        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
-        self.top.geometry(f"+{(sw - self.width) // 2}+{(sh - self.height) // 2}")
+        root_x = self.app.root.winfo_rootx()
+        root_y = self.app.root.winfo_rooty()
+        root_w = self.app.root.winfo_width()
+        root_h = self.app.root.winfo_height()
+        pos_x = root_x + (root_w - self.width) // 2
+        pos_y = root_y + (root_h - self.height) // 2
+        self.top.geometry(f"{self.width}x{self.height}+{pos_x}+{pos_y}")
 
     def set_ui_state(self, loading, err_text=""):
         self.cv.itemconfig(self.err_text, text=err_text)
@@ -614,7 +672,7 @@ class ModernNetflixApp:
         if confirm:
             self.set_banner_status("Đang cập nhật...", "Đang tải file và khởi động lại ứng dụng", mode="loading")
             self.root.update_idletasks()
-            threading.Thread(target=apply_full_update, daemon=True).start()
+            threading.Thread(target=apply_full_update, args=(self.root,), daemon=True).start()
 
     def _on_app_close(self):
         try: self.cmd_queue.put({"action": "quit"})
@@ -835,7 +893,6 @@ class ModernNetflixApp:
         # 3. KHỐI GIỮA: Get CODE / Get LINK
         self.getcode_card = draw_rounded_rect(self.cv, self.S(36), self.S(278), self.S(844), self.S(420), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
         
-        # Mũi tên và Tiêu đề: CHỨC NĂNG THU GỌN / MỞ RỘNG
         self.toggle_icon = self.cv.create_text(self.S(52), self.S(303), text="▶", fill=self.TEXT_WHITE, font=("Arial", self.F(13)), anchor="w")
         title_init = "Get CODE" if self.sub_mode == "CODE" else "Get LINK"
         self.getcode_title_label = self.cv.create_text(self.S(74), self.S(303), text=title_init, fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
@@ -845,12 +902,10 @@ class ModernNetflixApp:
             self.cv.tag_bind(item, "<Enter>", lambda e: self.cv.itemconfig(self.getcode_title_label, fill="#38BDF8"))
             self.cv.tag_bind(item, "<Leave>", lambda e: self.cv.itemconfig(self.getcode_title_label, fill=self.TEXT_WHITE))
 
-        # Telegram Status
         self.telegram_status = self.cv.create_text(self.S(824), self.S(303), text=self.tg_status_text, fill=self.tg_status_color, font=("Arial", self.F(14), "bold"), anchor="e")
         self.cv.tag_bind(self.telegram_status, "<Button-1>", self._on_telegram_status_click)
 
         # --- NỘI DUNG BÊN TRONG CỦA THẺ GET CODE / GET LINK (3 Ô HÀNG DƯỚI) ---
-        # Ô 1 (Bên trái): Chỉ hiển thị "CODE" hoặc "LINK" (Click để chuyển chế độ)
         mode_btn_text = "LINK" if self.sub_mode == "LINK" else "CODE"
         self.btn_submode_rect = draw_rounded_rect(self.cv, self.S(52), self.S(344), self.S(172), self.S(404), radius=self.S(10), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5, tags=("getcode_content",))
         self.btn_submode_text = self.cv.create_text(self.S(112), self.S(374), text=mode_btn_text, fill=self.TEXT_WHITE, font=("Arial", self.F(14), "bold"), anchor="center", tags=("getcode_content",))
@@ -860,12 +915,10 @@ class ModernNetflixApp:
             self.cv.tag_bind(itm, "<Enter>", lambda e: (self.cv.itemconfig(self.btn_submode_rect, outline=self.BORDER_ACTIVE), self.cv.itemconfig(self.btn_submode_text, fill="#38BDF8")))
             self.cv.tag_bind(itm, "<Leave>", lambda e: (self.cv.itemconfig(self.btn_submode_rect, outline=self.BORDER_CARD), self.cv.itemconfig(self.btn_submode_text, fill=self.TEXT_WHITE)))
 
-        # Ô 2 (Ở giữa): Ô NHẬP LIỆU (Email / Link / JSON)
         self.getcode_input_rect = draw_rounded_rect(self.cv, self.S(184), self.S(344), self.S(684), self.S(404), radius=self.S(10), fill=self.BG_INPUT, outline=self.BORDER_INPUT, width=1.5, tags=("getcode_content",))
         self.getcode_email = tk.StringVar()
         self.getcode_entry = tk.Entry(self.cv, textvariable=self.getcode_email, bg=self.BG_INPUT, fg=self.TEXT_MUTED, insertbackground=self.TEXT_WHITE, font=("Arial", self.F(14)), bd=0, highlightthickness=0)
         
-        # Mặc định lấy theo sub_mode
         placeholder_text = "Nhập email ạ..." if self.sub_mode == "CODE" else "Nhập link/JSON ạ..."
         self.getcode_entry.insert(0, placeholder_text)
         self.getcode_placeholder_active = True
@@ -879,7 +932,6 @@ class ModernNetflixApp:
         self.getcode_entry_win = self.cv.create_window(self.S(198), self.S(374), window=self.getcode_entry, width=self.S(472), height=self.S(28), anchor="w", tags=("getcode_content",))
         self.cv.tag_bind(self.getcode_input_rect, "<Button-1>", lambda e: self.getcode_entry.focus_set())
 
-        # Ô 3 (Bên phải): NÚT "GET" CỐ ĐỊNH CHO CẢ 2 CHẾ ĐỘ
         self.getcode_button_rect = draw_rounded_rect(self.cv, self.S(696), self.S(344), self.S(828), self.S(404), radius=self.S(10), fill=self.BTN_BG_INACTIVE, outline="", tags=("getcode_content",))
         self.getcode_button_label = self.cv.create_text(self.S(762), self.S(374), text="GET", fill=self.TEXT_WHITE, font=("Arial", self.F(14), "bold"), anchor="center", tags=("getcode_content",))
         hit_getcode_btn = self.cv.create_rectangle(self.S(696), self.S(344), self.S(828), self.S(404), fill="", outline="", tags=("getcode_content",))
@@ -888,7 +940,6 @@ class ModernNetflixApp:
             self.cv.tag_bind(itm, "<Enter>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_HOVER) if not getattr(self, "_getcode_running", False) else None)
             self.cv.tag_bind(itm, "<Leave>", lambda e: self.cv.itemconfig(self.getcode_button_rect, fill=self.BTN_BG_INACTIVE) if not getattr(self, "_getcode_running", False) else None)
             
-        # 3.1 Badge kết quả phụ (Mã OTP hoặc Trạng thái Link) -> Đưa ẩn lên sát bên trong để dùng nếu cần
         self.otp_badge_txt = self.cv.create_text(self.S(800), self.S(374), text="______", fill=self.BG_INPUT, font=("Arial", self.F(1), "bold"), anchor="center", state="hidden")
 
         # 4. FOOTER: STATUS BAR & SPAM TIMER
@@ -986,7 +1037,6 @@ class ModernNetflixApp:
     # GÓP Ý
     # ==========================================
     def open_feedback_dialog(self):
-        # Chặn mở trùng nhiều cửa sổ Feedback
         if getattr(self, "_feedback_win", None) is not None and self._feedback_win.winfo_exists():
             self._feedback_win.lift()
             self._feedback_win.focus_force()
@@ -1113,7 +1163,7 @@ class ModernNetflixApp:
             try:
                 data = json.dumps(payload).encode('utf-8')
                 req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-                with urllib.request.urlopen(req, timeout=8) as response:
+                with urllib.request.urlopen(req, timeout=8, context=SSL_CONTEXT) as response:
                     if response.status == 200:
                         window.after(0, window.destroy)
                         window.after(0, lambda: self.show_success_modal(sender))
@@ -1183,7 +1233,6 @@ class ModernNetflixApp:
         text_widgets = {}
         tag_labels = {}
 
-        # 1. HÀNG 3 NÚT TAB
         btn_w, btn_h, gap = 120, 32, 10
         start_x = 35
         for idx, item in enumerate(tab_schemas):
@@ -1202,7 +1251,6 @@ class ModernNetflixApp:
             for itm in (rect, txt, hit):
                 pcv.tag_bind(itm, "<Button-1>", _make_click(fid))
 
-        # 2. KHUNG NỘI DUNG CHÍNH Ở GIỮA
         card_top, card_bottom = 66, 340
         draw_rounded_rect(pcv, 24, card_top, 436, card_bottom, radius=12, fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
         
@@ -1239,7 +1287,6 @@ class ModernNetflixApp:
             current_win_item[0] = pcv.create_window(46, card_top + 42, window=active_text_widget, width=366, height=card_bottom - card_top - 66, anchor="nw")
             active_text_widget.focus_set()
 
-        # 3. NÚT APPLY DƯỚI ĐÁY
         def _on_apply():
             new_data = {fid: text_widgets[fid].get("1.0", "end").strip() for fid in text_widgets}
             save_custom_templates(new_data)
@@ -1332,7 +1379,6 @@ class ModernNetflixApp:
             self._start_getcode_error_countdown("Dữ liệu trống", "Vui lòng dán dữ liệu vào ô nhập", 5)
             return "break"
 
-        # PHÂN NHÁNH 1: CHẾ ĐỘ GET CODE
         if self.sub_mode == "CODE":
             email_match = RE_EMAIL.search(raw_val)
             email = email_match.group(1).strip() if email_match else ""
@@ -1350,13 +1396,10 @@ class ModernNetflixApp:
             threading.Thread(target=self._fetch_code_from_bot_thread, args=(email,), daemon=True).start()
             return "break"
 
-        # PHÂN NHÁNH 2: CHẾ ĐỘ GET LINK
         else:
-            # Kiểm tra xem có phải định dạng Link hoặc JSON hợp lệ không
             is_link = raw_val.startswith("http://") or raw_val.startswith("https://")
             is_json = raw_val.startswith("{") or raw_val.startswith("[")
             
-            # Nếu người dùng dán nhầm Email/Text vào ô Get LINK -> Báo lỗi & tự xoá 5s
             if not is_link and not is_json:
                 self.cv.itemconfig(self.otp_badge_txt, text="ERR", fill="#EF4444")
                 if "@" in raw_val:
@@ -1430,7 +1473,6 @@ class ModernNetflixApp:
             self.root.after(0, lambda: self._finish_getcode(None, f"Lỗi: {e}"))
 
     def _fetch_link_from_bot_thread(self, payload_text: str):
-        """Xử lý luồng lấy login link từ bot @loginlinkjm_bot"""
         try:
             api_id = int(os.environ.get("TG_API_ID", 0))
             api_hash = os.environ.get("TG_API_HASH", "")
@@ -1658,9 +1700,12 @@ class ModernNetflixApp:
     def play_sound(self):
         if getattr(self, "is_muted", False): return
         try:
+            ext_sound = os.path.join(APP_DIR, "alert.aiff")
             bundled_sound = os.path.join(BUNDLE_DIR, "alert.aiff")
             if sys.platform == "darwin":
-                sound_file = bundled_sound if os.path.exists(bundled_sound) else "/System/Library/Sounds/Glass.aiff"
+                if os.path.exists(ext_sound): sound_file = ext_sound
+                elif os.path.exists(bundled_sound): sound_file = bundled_sound
+                else: sound_file = "/System/Library/Sounds/Glass.aiff"
                 subprocess.Popen(["afplay", sound_file])
             elif sys.platform == "win32":
                 import winsound
@@ -1671,11 +1716,16 @@ class ModernNetflixApp:
     def play_startup_sound(self):
         if getattr(self, "is_muted", False): return
         try:
-            mp3_path = os.path.join(BUNDLE_DIR, "startup.mp3")
-            if not os.path.exists(mp3_path): mp3_path = os.path.join(APP_DIR, "startup.mp3")
+            mp3_path = os.path.join(APP_DIR, "startup.mp3")
+            if not os.path.exists(mp3_path):
+                mp3_path = os.path.join(BUNDLE_DIR, "startup.mp3")
             if os.path.exists(mp3_path):
-                if sys.platform == "darwin": subprocess.Popen(["afplay", mp3_path])
-                elif sys.platform == "win32": subprocess.Popen(["powershell", "-c", f'(New-Object Media.SoundPlayer "{mp3_path}").PlaySync();'], shell=True)
+                if sys.platform == "darwin":
+                    subprocess.Popen(["afplay", mp3_path])
+                elif sys.platform == "win32":
+                    # Dùng WMPlayer.OCX để phát chuẩn định dạng .mp3 ngầm trên Windows
+                    ps_cmd = f'$p = New-Object -ComObject WMPlayer.OCX; $p.url = "{mp3_path}"; $p.controls.play(); Start-Sleep -Seconds 5'
+                    subprocess.Popen(["powershell", "-WindowStyle", "Hidden", "-Command", ps_cmd], creationflags=0x08000000)
         except Exception: pass
 
     def _on_code_paste(self, event=None):
@@ -2052,6 +2102,18 @@ class ModernNetflixApp:
         self.code_entry.focus_set()
 
 if __name__ == "__main__":
+    # Nạp động file sharetool.py mới nhất nếu đang chạy bản đóng gói (.app/.exe) và đã bấm Update
+    updated_script = os.path.join(APP_DIR, "sharetool.py")
+    if getattr(sys, 'frozen', False) and os.path.exists(updated_script) and not os.environ.get("NETFLIX_DYNAMIC_LOADED"):
+        try:
+            os.environ["NETFLIX_DYNAMIC_LOADED"] = "1"
+            with open(updated_script, "r", encoding="utf-8") as f:
+                code_str = f.read()
+            exec(compile(code_str, updated_script, 'exec'), globals())
+            sys.exit(0)
+        except Exception:
+            pass
+
     root = tk.Tk()
     try: root.tk.call('tk', 'scaling', 1.3333)
     except Exception: pass
