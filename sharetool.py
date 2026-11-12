@@ -117,28 +117,51 @@ def check_update_available():
         pass
     return False
 
-def apply_full_update(root_widget=None):
-    """Tải đè file mới vào APP_DIR và khởi động lại ứng dụng mượt mà trên cả Mac & Win"""
+def apply_full_update(app_instance=None):
+    """Tải song song file mới, cập nhật UI real-time và khởi động lại ứng dụng mượt mà trên cả Mac & Win"""
+    import concurrent.futures
+
+    def _update_status(main_msg, sub_msg, mode="loading"):
+        if app_instance and hasattr(app_instance, "root") and app_instance.root.winfo_exists():
+            app_instance.root.after(0, lambda: app_instance.set_banner_status(main_msg, sub_msg, mode=mode))
+
     try:
-        for file_name in FILES_TO_SYNC:
+        total_files = len(FILES_TO_SYNC)
+        completed = [0]
+
+        def _download_single(file_name):
             local_path = get_local_sync_path(file_name)
             remote_url = f"{BASE_URL}{file_name}?t={int(time.time())}"
             req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
-            with urllib.request.urlopen(req, timeout=8, context=SSL_CONTEXT) as resp:
+            with urllib.request.urlopen(req, timeout=12, context=SSL_CONTEXT) as resp:
                 remote_data = resp.read()
             if remote_data:
-                with open(local_path, "wb") as f:
+                # Ghi ra file tạm trước để chống hỏng file
+                tmp_path = local_path + ".tmp"
+                with open(tmp_path, "wb") as f:
                     f.write(remote_data)
+                os.replace(tmp_path, local_path)
+            completed[0] += 1
+            _update_status("Đang cập nhật...", f"Đã tải {completed[0]}/{total_files} file: {file_name}", mode="loading")
+            return file_name
+
+        _update_status("Đang tải dữ liệu mới...", "Đang kết nối tới máy chủ GitHub...", mode="loading")
+
+        # Tải song song cả 4 file cùng lúc (tăng tốc 3x-4x)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(_download_single, FILES_TO_SYNC))
+
+        _update_status("Tải xong bản cập nhật!", "Đang khởi động lại ứng dụng...", mode="success")
+        time.sleep(0.4)
 
         def _restart_app():
             try:
-                # Dọn dẹp tài nguyên và tắt ngầm các kết nối trước khi khởi động lại
                 try:
                     TG_MANAGER.shutdown()
                 except Exception:
                     pass
-                if root_widget:
-                    root_widget.destroy()
+                if app_instance and hasattr(app_instance, "root") and app_instance.root.winfo_exists():
+                    app_instance.root.destroy()
             except Exception:
                 pass
             
@@ -147,23 +170,24 @@ def apply_full_update(root_widget=None):
                 # Nếu là bản đóng gói (.app / .exe)
                 subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR)
             else:
-                # Nếu chạy bằng python script thông thường trên macOS / Windows
+                # Nếu chạy bằng python script
                 target_script = os.path.join(APP_DIR, "sharetool.py")
                 args = [executable, target_script]
                 subprocess.Popen(args, cwd=APP_DIR)
             
-            # Thoát ngay tiến trình cũ để tránh bị deadlock giữa các thread
+            # Thoát tiến trình cũ
             os._exit(0)
 
-        if root_widget:
-            root_widget.after(100, _restart_app)
+        if app_instance and hasattr(app_instance, "root") and app_instance.root.winfo_exists():
+            app_instance.root.after(100, _restart_app)
         else:
             _restart_app()
 
     except Exception as e:
         err_msg = f"Không thể cập nhật: {e}"
-        if root_widget:
-            root_widget.after(0, lambda: messagebox.showerror("Lỗi Update", err_msg, parent=root_widget))
+        _update_status("Cập nhật thất bại", str(e)[:45], mode="error")
+        if app_instance and hasattr(app_instance, "root") and app_instance.root.winfo_exists():
+            app_instance.root.after(0, lambda: messagebox.showerror("Lỗi Update", err_msg, parent=app_instance.root))
         else:
             messagebox.showerror("Lỗi Update", err_msg)
 
@@ -849,9 +873,9 @@ class UpdatePromptModal:
 
     def _on_confirm_update(self):
         self.top.destroy()
-        self.app.set_banner_status("Đang cập nhật...", "Đang tải file và khởi động lại ứng dụng", mode="loading")[cite: 1]
-        self.app.root.update_idletasks()[cite: 1]
-        threading.Thread(target=apply_full_update, args=(self.app.root,), daemon=True).start()[cite: 1]
+        self.app.set_banner_status("Đang cập nhật...", "Chuẩn bị tải bản cập nhật mới...", mode="loading")
+        self.app.root.update_idletasks()
+        threading.Thread(target=apply_full_update, args=(self.app,), daemon=True).start()
 
 # ==========================================
 # 5. CLASS CHÍNH CỦA ỨNG DỤNG
