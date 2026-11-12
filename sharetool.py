@@ -1042,7 +1042,7 @@ class ModernNetflixApp:
 
         # 1. KHỐI TRÊN TRÁI: Chuẩn hoá (CSKH)
         draw_rounded_rect(self.cv, self.S(36), self.S(36), self.S(306), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format s1111s", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format DATA", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # NÚT "Edit"
         btn_set_x, btn_set_w = 246, 44
