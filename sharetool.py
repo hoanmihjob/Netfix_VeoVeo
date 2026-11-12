@@ -43,7 +43,7 @@ if sys.platform == "win32":
 # ==========================================
 # 0. QUẢN LÝ ĐƯỜNG DẪN ĐÓNG GÓI CHUẨN MAC & WIN
 # ==========================================
-CURRENT_APP_VERSION = "2026.11.13.1"
+CURRENT_APP_VERSION = "2026.11.13.2"
 
 def get_bundle_dir():
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
