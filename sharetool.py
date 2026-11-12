@@ -12,7 +12,36 @@ import subprocess
 import urllib.request
 import urllib.parse
 import platform
+import runpy
 from tkinter import messagebox
+
+# ==========================================
+# CƠ CHẾ NẠP BẢN CẬP NHẬT MỚI CHO BẢN ĐÓNG GÓI (.APP / .EXE)
+# ==========================================
+def _check_and_run_updated_core():
+    """Nếu ứng dụng đang chạy ở dạng đóng gói và đã tải bản sharetool.py mới về APP_DIR, tự động thực thi file mới"""
+    if getattr(sys, 'frozen', False) and not os.environ.get("NETFLIX_UPDATED_CORE_ACTIVE"):
+        if sys.platform == "darwin":
+            app_dir = os.path.expanduser("~/Library/Application Support/Netflix_VeoVeo")
+        else:
+            app_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Netflix_VeoVeo")
+        
+        updated_script = os.path.join(app_dir, "sharetool.py")
+        if os.path.exists(updated_script):
+            try:
+                with open(updated_script, "r", encoding="utf-8") as f:
+                    code = f.read()
+                compile(code, updated_script, "exec")
+                os.environ["NETFLIX_UPDATED_CORE_ACTIVE"] = "1"
+                runpy.run_path(updated_script, run_name="__main__")
+                sys.exit(0)
+            except Exception:
+                try:
+                    os.remove(updated_script)
+                except Exception:
+                    pass
+
+_check_and_run_updated_core()
 
 # ==========================================
 # KHẮC PHỤC TRIỆT ĐỂ LỖI SSL TRÊN MACOS & WINDOWS
@@ -43,7 +72,7 @@ if sys.platform == "win32":
 # ==========================================
 # 0. QUẢN LÝ ĐƯỜNG DẪN ĐÓNG GÓI CHUẨN MAC & WIN
 # ==========================================
-CURRENT_APP_VERSION = "2026.11.13.5"
+CURRENT_APP_VERSION = "2026.11.13.1"
 
 def get_bundle_dir():
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -182,14 +211,20 @@ def apply_full_update(app_instance=None):
                 pass
             
             executable = sys.executable
+            env = os.environ.copy()
+            env.pop("NETFLIX_UPDATED_CORE_ACTIVE", None)
             if getattr(sys, 'frozen', False):
                 # Nếu là bản đóng gói (.app / .exe)
-                subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR)
+                if sys.platform == "darwin" and ".app/Contents/MacOS" in executable:
+                    app_bundle = os.path.abspath(os.path.join(os.path.dirname(executable), "../../.."))
+                    subprocess.Popen(["open", "-n", app_bundle], env=env)
+                else:
+                    subprocess.Popen([executable] + sys.argv[1:], cwd=APP_DIR, env=env)
             else:
                 # Nếu chạy bằng python script
                 target_script = os.path.join(APP_DIR, "sharetool.py")
                 args = [executable, target_script]
-                subprocess.Popen(args, cwd=APP_DIR)
+                subprocess.Popen(args, cwd=APP_DIR, env=env)
             
             # Thoát tiến trình cũ
             os._exit(0)
@@ -926,6 +961,7 @@ class ModernNetflixApp:
         self.root.configure(bg=self.BG_WINDOW)
 
         self.has_update = False
+        self._app_running = True
         threading.Thread(target=self._check_update_background, daemon=True).start()
         self.UI_SCALE = 1.0  
         self.is_muted = False
@@ -968,17 +1004,41 @@ class ModernNetflixApp:
     def F(self, val): return int(val * getattr(self, 'UI_SCALE', 1.0))
 
     def _check_update_background(self):
-        if check_update_available():
-            self.has_update = True
-            def _show_dot():
-                if getattr(self, "menu_is_open", False):
-                    self.cv.itemconfig(self.update_dot, state="normal")
-            self.root.after(0, _show_dot)
+        # Kiểm tra lặp lại định kỳ mỗi 30s để cập nhật ngay cả khi app đang mở
+        while getattr(self, "_app_running", True):
+            try:
+                if check_update_available():
+                    self.has_update = True
+                    def _show_dot():
+                        # Nếu menu đang mở thì hiện trên nút Update
+                        if getattr(self, "menu_is_open", False):
+                            self.cv.itemconfig(self.update_dot, state="normal")
+                        else:
+                            # Nếu menu đang đóng thì hiện trên nút [+]
+                            if hasattr(self, "btn_tg_dot"):
+                                self.cv.itemconfig(self.btn_tg_dot, state="normal")
+                    if hasattr(self, "root") and self.root.winfo_exists():
+                        self.root.after(0, _show_dot)
+                    break
+            except Exception:
+                pass
+            time.sleep(30)
 
     def _on_click_update(self, event=None):
+        if not self.has_update:
+            try:
+                if check_update_available():
+                    self.has_update = True
+                    if hasattr(self, "btn_tg_dot"):
+                        self.cv.itemconfig(self.btn_tg_dot, state="normal")
+                    if getattr(self, "menu_is_open", False):
+                        self.cv.itemconfig(self.update_dot, state="normal")
+            except Exception:
+                pass
         UpdatePromptModal(self, self.has_update)
 
     def _on_app_close(self):
+        self._app_running = False
         try: self.cmd_queue.put({"action": "quit"})
         except Exception: pass
         try: TG_MANAGER.shutdown()
@@ -1076,6 +1136,11 @@ class ModernNetflixApp:
         self.btn_tg_text = self.cv.create_text(self.S(btn_tg_x + btn_tg_w // 2), self.S(65), text="+", fill=self.TEXT_MUTED, font=("Arial", self.F(20)), anchor="center")
         hit_tg = self.cv.create_rectangle(self.S(btn_tg_x), self.S(54), self.S(btn_tg_x + btn_tg_w), self.S(78), fill="", outline="")
         
+        # Chấm đỏ thông báo trên nút [+] ngoài màn hình chính
+        tg_dot_r = self.S(3.5)
+        tg_dot_x, tg_dot_y = self.S(btn_tg_x + btn_tg_w - 3), self.S(58)
+        self.btn_tg_dot = self.cv.create_oval(tg_dot_x - tg_dot_r, tg_dot_y - tg_dot_r, tg_dot_x + tg_dot_r, tg_dot_y + tg_dot_r, fill="#EF4444", outline="", state="hidden")
+        
         # BỘ 4 NÚT (Ẩn mặc định)
         btn_snd_w = 56
         btn_snd_x = btn_tg_x - btn_snd_w - 10
@@ -1141,14 +1206,20 @@ class ModernNetflixApp:
             self.menu_is_open = not self.menu_is_open
             if self.menu_is_open:
                 self.cv.itemconfigure("menu_btns", state="normal")
-                if not getattr(self, "has_update", False):
+                if getattr(self, "has_update", False):
+                    self.cv.itemconfig(self.update_dot, state="normal")
+                else:
                     self.cv.itemconfig(self.update_dot, state="hidden")
+                if hasattr(self, "btn_tg_dot"):
+                    self.cv.itemconfig(self.btn_tg_dot, state="hidden")
                 self.cv.itemconfig(self.btn_tg_text, text="-", fill="#38BDF8")
                 self.cv.itemconfig(self.btn_tg_rect, outline="#38BDF8")
             else:
                 self.cv.itemconfigure("menu_btns", state="hidden")
                 self.cv.itemconfig(self.btn_tg_text, text="+", fill=self.TEXT_MUTED)
                 self.cv.itemconfig(self.btn_tg_rect, outline=self.BORDER_CARD)
+                if getattr(self, "has_update", False) and hasattr(self, "btn_tg_dot"):
+                    self.cv.itemconfig(self.btn_tg_dot, state="normal")
 
         for itm in (self.btn_tg_rect, self.btn_tg_text, hit_tg):
             self.cv.tag_bind(itm, "<Button-1>", _toggle_menu)
