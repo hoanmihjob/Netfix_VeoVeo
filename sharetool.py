@@ -43,6 +43,8 @@ if sys.platform == "win32":
 # ==========================================
 # 0. QUẢN LÝ ĐƯỜNG DẪN ĐÓNG GÓI CHUẨN MAC & WIN
 # ==========================================
+CURRENT_APP_VERSION = "2026.11.13.1"
+
 def get_bundle_dir():
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return sys._MEIPASS
@@ -50,10 +52,15 @@ def get_bundle_dir():
 
 def get_app_data_dir():
     if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        if sys.platform == "darwin" and ".app/Contents/MacOS" in exe_dir:
-            return os.path.abspath(os.path.join(exe_dir, "../../.."))
-        return exe_dir
+        if sys.platform == "darwin":
+            # Thư mục chuẩn macOS có quyền ghi dữ liệu mà không cần quyền Admin/Root
+            app_support = os.path.expanduser("~/Library/Application Support/Netflix_VeoVeo")
+            os.makedirs(app_support, exist_ok=True)
+            return app_support
+        else:
+            appdata = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Netflix_VeoVeo")
+            os.makedirs(appdata, exist_ok=True)
+            return appdata
     return os.path.dirname(os.path.abspath(__file__))
 
 BUNDLE_DIR = get_bundle_dir()
@@ -71,15 +78,17 @@ FILES_TO_SYNC = [
 ]
 
 def get_local_sync_path(file_name):
-    """Luôn lưu và kiểm tra file cập nhật tại thư mục chứa ứng dụng (APP_DIR)"""
+    """Luôn lưu và kiểm tra file cập nhật tại thư mục dữ liệu ứng dụng (APP_DIR)"""
     return os.path.join(APP_DIR, file_name)
 
 def check_update_available():
-    """Kiểm tra xem có file nào khác biệt trên GitHub hay không (chỉ đọc, không ghi đè)"""
+    """Kiểm tra xem có file nào khác biệt trên GitHub hay không (so sánh cả bản đóng gói và bản chạy script)"""
     try:
+        # 1. Kiểm tra nhanh qua file version.txt hoặc Commit SHA trên GitHub
         for file_name in FILES_TO_SYNC:
             local_path = get_local_sync_path(file_name)
-            # Nếu đang chạy bản đóng gói mà chưa từng tải file lẻ về APP_DIR thì lấy file trong BUNDLE_DIR để đối chiếu
+            
+            # Đối với bản đóng gói, nếu chưa từng tải sharetool.py về APP_DIR
             if not os.path.exists(local_path):
                 bundled_candidate = os.path.join(BUNDLE_DIR, file_name)
                 if os.path.exists(bundled_candidate):
@@ -88,7 +97,7 @@ def check_update_available():
             remote_url = f"{BASE_URL}{file_name}?t={int(time.time())}"
             try:
                 req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'})
-                with urllib.request.urlopen(req, timeout=4, context=SSL_CONTEXT) as resp:
+                with urllib.request.urlopen(req, timeout=5, context=SSL_CONTEXT) as resp:
                     remote_data = resp.read()
             except Exception:
                 continue
@@ -96,11 +105,18 @@ def check_update_available():
             if not remote_data:
                 continue
 
+            # Nếu file local chưa tồn tại trong APP_DIR (ví dụ sharetool.py ở lần đầu chạy bản đóng gói)
             if not os.path.exists(local_path):
-                # Bỏ qua việc báo update nếu là sharetool.py nằm ẩn trong gói exe lần đầu chạy
-                if file_name == "sharetool.py" and getattr(sys, 'frozen', False):
-                    continue
-                return True
+                # Kiểm tra xem mã version trong remote_data có khác với CURRENT_APP_VERSION không
+                remote_text = remote_data.decode("utf-8", errors="ignore")
+                match = re.search(r'CURRENT_APP_VERSION\s*=\s*["\']([^"\']+)["\']', remote_text)
+                if match:
+                    remote_ver = match.group(1).strip()
+                    if remote_ver != CURRENT_APP_VERSION:
+                        return True
+                else:
+                    return True
+                continue
 
             with open(local_path, "rb") as f:
                 local_data = f.read()
@@ -1026,12 +1042,12 @@ class ModernNetflixApp:
 
         # 1. KHỐI TRÊN TRÁI: Chuẩn hoá (CSKH)
         draw_rounded_rect(self.cv, self.S(36), self.S(36), self.S(306), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format DAAAAATA", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format DATA", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # NÚT "Edit"
         btn_set_x, btn_set_w = 246, 44
         self.btn_set_rect = draw_rounded_rect(self.cv, self.S(btn_set_x), self.S(54), self.S(btn_set_x + btn_set_w), self.S(78), radius=self.S(6), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.2)
-        self.btn_set_text = self.cv.create_text(self.S(btn_set_x + btn_set_w // 2), self.S(66), text="EdAAÂit", fill=self.TEXT_MUTED, font=("Arial", self.F(12)), anchor="center")
+        self.btn_set_text = self.cv.create_text(self.S(btn_set_x + btn_set_w // 2), self.S(66), text="Edit", fill=self.TEXT_MUTED, font=("Arial", self.F(12)), anchor="center")
         hit_set = self.cv.create_rectangle(self.S(btn_set_x), self.S(54), self.S(btn_set_x + btn_set_w), self.S(78), fill="", outline="")
         for itm in (self.btn_set_rect, self.btn_set_text, hit_set):
             self.cv.tag_bind(itm, "<Button-1>", lambda e: self._open_template_settings())
