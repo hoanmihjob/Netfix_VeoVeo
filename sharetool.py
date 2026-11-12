@@ -1026,12 +1026,12 @@ class ModernNetflixApp:
 
         # 1. KHỐI TRÊN TRÁI: Chuẩn hoá (CSKH)
         draw_rounded_rect(self.cv, self.S(36), self.S(36), self.S(306), self.S(260), radius=self.S(14), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.5)
-        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format DTA", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
+        self.cskh_title_text = self.cv.create_text(self.S(52), self.S(66), text="Format DAAAAATA", fill=self.TEXT_WHITE, font=("Arial", self.F(16), "bold"), anchor="w")
 
         # NÚT "Edit"
         btn_set_x, btn_set_w = 246, 44
         self.btn_set_rect = draw_rounded_rect(self.cv, self.S(btn_set_x), self.S(54), self.S(btn_set_x + btn_set_w), self.S(78), radius=self.S(6), fill=self.BG_CARD, outline=self.BORDER_CARD, width=1.2)
-        self.btn_set_text = self.cv.create_text(self.S(btn_set_x + btn_set_w // 2), self.S(66), text="Edit", fill=self.TEXT_MUTED, font=("Arial", self.F(12)), anchor="center")
+        self.btn_set_text = self.cv.create_text(self.S(btn_set_x + btn_set_w // 2), self.S(66), text="EdAAÂit", fill=self.TEXT_MUTED, font=("Arial", self.F(12)), anchor="center")
         hit_set = self.cv.create_rectangle(self.S(btn_set_x), self.S(54), self.S(btn_set_x + btn_set_w), self.S(78), fill="", outline="")
         for itm in (self.btn_set_rect, self.btn_set_text, hit_set):
             self.cv.tag_bind(itm, "<Button-1>", lambda e: self._open_template_settings())
